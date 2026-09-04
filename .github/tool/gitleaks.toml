@@ -1,0 +1,42 @@
+# gitleaks configuration for Android pipelines.
+# Extends the upstream default rule set and adds Android-specific allowlists so
+# the scan does not drown in false positives from build output and fixtures.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Global allowlist for Android build output and fixtures"
+
+paths = [
+  '''.*/build/.*''',
+  '''.*/\.gradle/.*''',
+  '''.*/generated/.*''',
+  '''gradle/wrapper/gradle-wrapper\.properties''',
+  '''.*\.(png|jpg|jpeg|webp|gif|svg|ttf|otf|so|jar|aar|apk|aab)$''',
+  '''.*/src/test/resources/.*''',
+]
+
+regexes = [
+  # Placeholder values used in templates and sample configs.
+  '''(?i)(your|example|sample|dummy|placeholder|changeme|xxxx)[-_]?(key|token|secret|password)''',
+]
+
+[[rules]]
+id = "android-google-api-key"
+description = "Google API key committed in source"
+regex = '''AIza[0-9A-Za-z\-_]{35}'''
+tags = ["key", "google", "android"]
+
+[[rules]]
+id = "android-keystore-password-in-gradle"
+description = "Keystore or signing password hardcoded in a Gradle/properties file"
+regex = '''(?i)(storePassword|keyPassword|keyAlias|signingPassword)\s*[=:]\s*["'][^"'$\n]{3,}["']'''
+path = '''.*\.(gradle|kts|properties)$'''
+tags = ["android", "signing"]
+
+[[rules]]
+id = "android-firebase-server-key"
+description = "Firebase Cloud Messaging server key"
+regex = '''AAAA[A-Za-z0-9_\-]{7}:[A-Za-z0-9_\-]{140,}'''
+tags = ["key", "firebase", "android"]

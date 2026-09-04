@@ -1,5 +1,15 @@
-# Detekt configuration (baseline for Kotlin + Jetpack Compose)
-# Projects can copy this and customize locally.
+# Detekt configuration (baseline for Kotlin + Jetpack Compose).
+#
+# Applied automatically by gradle/detekt.init.gradle with
+# buildUponDefaultConfig = true, so every rule detekt enables by default stays
+# on and this file only records the deliberate deviations.
+#
+# A caller repo can override by committing its own config/detekt/detekt.yml or
+# detekt.yml at the repo root -- the CI job prefers those over this file.
+#
+# NOTE: only ruleset names detekt (or a loaded rule plugin) knows about are
+# valid top level keys here. `validation: true` below will fail the build on an
+# unknown key, which is the point -- a typo must not silently disable a rule.
 
 build:
   maxIssues: 0
@@ -7,6 +17,7 @@ build:
 
 config:
   validation: true
+  warningsAsErrors: false
 
 processors:
   active: true
@@ -17,8 +28,7 @@ console-reports:
     - 'ProjectStatisticsReport'
     - 'ComplexityReport'
     - 'NotificationReport'
-    - 'FindingsReport'   # keep summary concise in CI
-    - 'FileBasedFindingsReport'
+    - 'FindingsReport'   # keep the console output concise in CI
 
 output-reports:
   active: true
@@ -29,23 +39,46 @@ comments:
 
 style:
   active: true
+
+  # ---- dead code: file-local scope ----
+  # These are the closest detekt gets to vulture. They only see private and
+  # local declarations; cross-module unused code is Qodana's job in the
+  # dead_code CI stage.
+  UnusedImports:
+    active: true
+  UnusedPrivateClass:
+    active: true
+  UnusedPrivateMember:
+    active: true
+    allowedNames: '(_|ignored|expected|serialVersionUID)'
+  UnusedPrivateProperty:
+    active: true
+    allowedNames: '(_|ignored|expected|serialVersionUID)'
+  UnusedParameter:
+    active: true
+    allowedNames: '(_|ignored|expected|serialVersionUID)'
+  CanBeNonNullable:
+    active: true
+  RedundantVisibilityModifierRule:
+    active: false   # Spotless/ktlint owns this
+
+  # ---- general style ----
   MagicNumber:
     active: true
     ignoreNumbers: ['-1', '0', '1', '2', '100', '200']
     ignoreHashCodeFunction: true
+    ignoreAnnotated: ['Composable', 'Preview']
   WildcardImport:
     active: true
     excludeImports:
       - 'java.util.*'
       - 'kotlinx.coroutines.*'
-      - 'androidx.compose.*'   # compose often expands many symbols
+      - 'androidx.compose.*'   # Compose often expands many symbols
   MaxLineLength:
     active: true
     maxLineLength: 140
     excludePackageStatements: true
     excludeImportStatements: true
-  UnusedImports:
-    active: true
   ReturnCount:
     active: true
     max: 3
@@ -57,6 +90,13 @@ style:
       - 'onResume'
   DataClassShouldBeImmutable:
     active: true
+  ForbiddenComment:
+    active: true
+    comments:
+      - reason: 'Track work in the issue tracker, not in a comment.'
+        value: 'FIXME:'
+      - reason: 'Leftover debugging marker.'
+        value: 'STOPSHIP:'
 
 naming:
   active: true
@@ -65,7 +105,7 @@ naming:
     excludes: ['**/preview/**', '**/*Preview*.*']
   FunctionNaming:
     active: true
-    # Allow @Composable PascalCase functions used as UI components
+    # Allow @Composable PascalCase functions used as UI components.
     ignoreAnnotated:
       - 'Composable'
       - 'Preview'
@@ -76,11 +116,13 @@ complexity:
   active: true
   LongParameterList:
     active: true
-    threshold: 8
+    functionThreshold: 8
+    constructorThreshold: 8
     ignoreAnnotated: ['Composable']
   LongMethod:
     active: true
     threshold: 80
+    ignoreAnnotated: ['Composable']
   LargeClass:
     active: true
     threshold: 600
@@ -88,6 +130,7 @@ complexity:
     active: true
     thresholdInClasses: 25
     thresholdInFiles: 30
+    ignoreAnnotatedFunctions: ['Composable', 'Preview']
 
 performance:
   active: true
@@ -98,29 +141,48 @@ potential-bugs:
     active: true
   IncorrectScopeFunctions:
     active: true
+  UnsafeCallOnNullableType:
+    active: true
+  UnsafeCast:
+    active: true
+  ImplicitDefaultLocale:
+    active: true
+
+exceptions:
+  active: true
+  TooGenericExceptionCaught:
+    active: true
+  SwallowedException:
+    active: true
+  PrintStackTrace:
+    active: true
 
 coroutines:
   active: true
+  GlobalCoroutineUsage:
+    active: true
+  SuspendFunSwallowedCancellation:
+    active: true
 
+# Provided by the io.nlopez.compose.rules:detekt plugin, which
+# gradle/detekt.init.gradle adds to the detektPlugins configuration. Without
+# that plugin on the classpath, `validation: true` would reject this block.
 compose:
-  active: true
   CompositionLocalAllowlist:
     active: false
-
-configurations:
-  excludes: ['**/build/**', '**/.gradle/**', '**/generated/**', '**/test/**', '**/androidTest/**', '**/resources/**']
-
-# Report formats (Gradle detekt task can also configure these)
-reports:
-  txt:
-    enabled: true
-    destination: build/reports/detekt/detekt.txt
-  xml:
-    enabled: true
-    destination: build/reports/detekt/detekt.xml
-  html:
-    enabled: true
-    destination: build/reports/detekt/detekt.html
-  sarif:
-    enabled: true
-    destination: build/reports/detekt/detekt.sarif.json
+  ContentEmitterReturningValues:
+    active: true
+  ModifierMissing:
+    active: true
+  ModifierNotUsedAtRoot:
+    active: true
+  ModifierReused:
+    active: true
+  MultipleEmitters:
+    active: true
+  MutableParams:
+    active: true
+  UnstableCollections:
+    active: false   # noisy on existing codebases; enable after triage
+  ViewModelForwarding:
+    active: true

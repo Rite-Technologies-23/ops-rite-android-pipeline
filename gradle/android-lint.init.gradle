@@ -1,0 +1,82 @@
+// gradle/android-lint.init.gradle
+// Forces a consistent Android Lint configuration on the calling repo WITHOUT
+// modifying its build files.
+//
+// Android Lint is the free security scanner for Android-specific defects
+// (AllowBackup, exported components, TrustAllX509TrustManager, cleartext traffic,
+// SetJavaScriptEnabled, hardcoded debug mode) AND the dead-resource detector
+// (UnusedResources, UnusedIds). AGP ships it -- there is nothing to install.
+//
+// Env:
+//   LINT_ABORT_ON_ERROR    "true"/"false" -- gate the build on lint errors
+//   LINT_WARNINGS_AS_ERRORS "true"/"false"
+//   LINT_BASELINE          path to a lint baseline xml (optional)
+
+def abortOnError    = (System.getenv("LINT_ABORT_ON_ERROR") ?: "true").toBoolean()
+def warningsAsErrors = (System.getenv("LINT_WARNINGS_AS_ERRORS") ?: "false").toBoolean()
+def baselinePath    = System.getenv("LINT_BASELINE") ?: ""
+def checkAllWarnings = (System.getenv("LINT_CHECK_ALL_WARNINGS") ?: "false").toBoolean()
+
+allprojects { Project p ->
+
+    def configureLint = { ->
+        p.extensions.configure("android") { android ->
+            android.lint { lint ->
+                lint.abortOnError = abortOnError
+                lint.warningsAsErrors = warningsAsErrors
+
+                // Analyse library modules from the app module too, so a defect in a
+                // dependency module is not invisible to the app's lint run.
+                lint.checkDependencies = true
+                lint.checkReleaseBuilds = true
+                lint.ignoreTestSources = true
+
+                // Security and dead-resource checks must never be silently downgraded.
+                lint.fatal.addAll([
+                        "AllowBackup",
+                        "HardcodedDebugMode",
+                        "ExportedActivity",
+                        "ExportedContentProvider",
+                        "ExportedReceiver",
+                        "ExportedService",
+                        "TrustAllX509TrustManager",
+                        "BadHostnameVerifier",
+                        "UnsafeProtectedBroadcastReceiver",
+                        "SetJavaScriptEnabled",
+                        "UnsafeDynamicallyLoadedCode",
+                        "WorldReadableFiles",
+                        "WorldWriteableFiles",
+                        "SetWorldReadable",
+                        "SetWorldWritable",
+                        "CustomX509TrustManager",
+                        "SecureRandom",
+                        "TrulyRandom",
+                        "PackagedPrivateKey",
+                        "GrantAllUris",
+                        "CipherGetInstanceAES",
+                ])
+
+                // Dead resources (UnusedResources/UnusedIds) are on by default and
+                // reported, not fatal -- see fail_on_dead_code. checkAllWarnings also
+                // turns on the checks lint disables by default; it is slower, so it is
+                // opt-in.
+                lint.checkAllWarnings = checkAllWarnings
+
+                lint.xmlReport = true
+                lint.htmlReport = true
+                lint.sarifReport = true
+                lint.textReport = false
+
+                if (baselinePath) {
+                    def bf = new File(baselinePath)
+                    if (bf.exists()) {
+                        lint.baseline = bf
+                    }
+                }
+            }
+        }
+    }
+
+    p.plugins.withId("com.android.application") { configureLint() }
+    p.plugins.withId("com.android.library")     { configureLint() }
+}

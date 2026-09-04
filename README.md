@@ -6,11 +6,28 @@ A production-ready reusable **GitHub Actions CI/CD pipeline for Android applicat
 
 ## ✨ Features
 
-- Gradle build caching
-- Detekt static analysis (auto-detected)
-- Android unit tests
-- JaCoCo coverage reporting
-- Coverage threshold enforcement
+### CI — complete quality gate, built entirely from free tooling
+
+| Concern | Tool | Gate |
+|---|---|---|
+| **Security (SAST)** | Android Lint security checks, Semgrep OSS (`p/kotlin`, `p/java`, `p/secrets` + Android rules) | fails on ERROR |
+| **Secret scanning** | gitleaks (binary — no org licence needed) | fails on any leak |
+| **Dependency CVEs** | CycloneDX SBOM → Trivy | report-only by default |
+| **Dead code** | Detekt `Unused*` rules, Android Lint `UnusedResources`, `buildHealth`, Qodana JVM Community | report-only by default |
+| **Static typing** | `kotlinc` with `-Xjsr305=strict`, optional warnings-as-errors | fails on type error |
+| **Lint** | Detekt with a shared config — always runs, never skip-if-absent | fails on any issue |
+| **Formatting** | Spotless + ktlint, with optional ratchet for legacy repos | fails on diff |
+| **Tests** | JUnit unit tests | fails on any failure |
+| **Coverage** | JaCoCo, **line and branch** thresholds, per-file PR comment | fails below threshold |
+
+Every tool is injected through a **Gradle init script** from this repo, so a caller
+repository adopts the whole pipeline **without changing a single build file**.
+
+### Platform
+
+- Gradle build caching, per-job cache scoping
+- Non-destructive Gradle wrapper bootstrap (the caller's declared version always wins)
+- Parallel CI jobs with an aggregated GitHub job summary
 - APK & AAB build
 - Secure keystore signing
 - Google Play Store deployment
@@ -18,16 +35,34 @@ A production-ready reusable **GitHub Actions CI/CD pipeline for Android applicat
 - GitHub Release creation
 - Automatic semantic version conflict resolution
 - Optional **“What’s New”** release notes from file
-- CI coverage summary inside GitHub Actions
 
 ---
 
 # 📦 Repository Structure
 
 ```
-.github/workflows
-├── push.yml        # Reusable Android CI workflow
-└── release.yml     # Reusable Android CD workflow
+.github/
+├── workflows/
+│   ├── push.yml                  # Reusable Android CI workflow
+│   └── release.yml               # Reusable Android CD workflow
+├── actions/setup-android/        # Shared setup: pipeline checkout, JDK, cache, wrapper
+└── tool/
+    ├── detekt.yml                # Shared Detekt config (lint + unused-code rules)
+    ├── .editorconfig             # Shared ktlint formatting contract
+    ├── gitleaks.toml             # Secret-scanning rules + Android allowlists
+    ├── qodana.yaml               # Cross-module dead-code inspection profile
+    ├── semgrep/android-rules.yml # Android/Kotlin SAST rules
+    ├── sonar-project.properties  # Optional SonarQube Community template
+    └── scripts/                  # Report summarisers wired into the job summary
+
+gradle/
+├── jacoco.init.gradle            # Coverage injection
+├── detekt.init.gradle            # Lint injection
+├── spotless.init.gradle          # Formatting injection
+├── android-lint.init.gradle      # Lint severity/report policy
+├── dependency-analysis.init.gradle  # Unused-dependency injection
+├── cyclonedx.init.gradle         # SBOM injection
+└── kotlin-strict.init.gradle     # Compiler strictness
 ```
 
 ---
@@ -38,25 +73,26 @@ Caller App Repository triggers reusable workflows.
 
 ### Reusable CI Workflow (`push.yml`)
 
+Five independent jobs run in parallel, then build and summary:
+
 ```
-Checkout repository
-      ↓
-Setup JDK
-      ↓
-Gradle dependency cache
-      ↓
-Run Detekt (if present)
-      ↓
-Run unit tests
-      ↓
-Generate JaCoCo coverage report
-      ↓
-Coverage threshold check
-      ↓
-Build APK/AAB
-      ↓
-Upload artifacts and reports
+                    ┌─ Lint & Format ──── Spotless/ktlint + Detekt
+                    │
+                    ├─ Android Lint ───── security checks + unused resources
+  Checkout          │
+  + setup-android ──┼─ Security ───────── gitleaks + Semgrep + SBOM/Trivy
+  (every job)       │
+                    ├─ Dead Code ──────── buildHealth (+ optional Qodana)
+                    │
+                    └─ Tests & Coverage ─ JUnit + JaCoCo line/branch gates
+                                                    ↓
+                                          Build APK + AAB
+                                                    ↓
+                                          CI Summary (job summary + artifacts)
 ```
+
+Only **Build** depends on **Tests** — everything else fans out, so a formatting
+failure and a coverage failure surface in the same run rather than one at a time.
 
 ### Reusable CD Workflow (`release.yml`)
 
@@ -80,26 +116,60 @@ Upload signed artifacts to GitHub Release
 
 # 🧪 Reusable CI Workflow (`push.yml`)
 
-Handles:
-
-- JDK setup
-- Gradle dependency caching
-- Static analysis using Detekt (if available)
-- Android unit tests
-- JaCoCo coverage generation
-- Coverage threshold validation
-- APK/AAB build
-- Artifact uploads
-
----
-
 ## Inputs
+
+### Required
 
 | Input | Description |
 |------|-------------|
 | `java_version` | Java version for Gradle |
 | `build_variant` | Android build variant (Debug / Release / StagingDebug) |
-| `coverage_threshold` | Minimum coverage percentage required |
+| `coverage_threshold` | Minimum LINE coverage percentage required |
+
+### Stage toggles
+
+| Input | Default | Description |
+|------|---------|-------------|
+| `runner` | `ubuntu-latest` | Runner label |
+| `run_tests` | `true` | Unit tests |
+| `run_coverage` | `true` | JaCoCo report + threshold gate |
+| `run_static_analysis` | `true` | Detekt |
+| `run_formatting` | `true` | Spotless + ktlint |
+| `run_android_lint` | `true` | Android Lint (security + unused resources) |
+| `run_security` | `true` | gitleaks + Semgrep |
+| `run_dependency_audit` | `true` | SBOM + Trivy + dependency submission |
+| `run_dead_code` | `true` | Unused-dependency analysis |
+| `run_deep_dead_code` | `false` | Qodana cross-module unused declarations (slow) |
+
+### Tuning
+
+| Input | Default | Description |
+|------|---------|-------------|
+| `coverage_branch_threshold` | `"0"` | Minimum BRANCH coverage %. `0` disables the branch gate |
+| `formatting_ratchet_from` | `""` | Git ref — only check files changed since it |
+| `lint_check_all_warnings` | `false` | Enable lint checks that are off by default |
+| `kotlin_jsr305_strict` | `true` | Enforce Java `@Nullable`/`@NonNull` at compile time |
+| `kotlin_warnings_as_errors` | `false` | Promote Kotlin warnings to errors |
+
+### Gates
+
+Each gate turns its stage from *blocking* into *report-only*. Defaults are chosen
+so a repo adopting the pipeline is not blocked on day one by pre-existing debt.
+
+| Input | Default | Blocks the build? |
+|------|---------|-------------------|
+| `fail_on_lint` | `true` | Detekt findings |
+| `fail_on_formatting` | `true` | Formatting differences |
+| `fail_on_android_lint` | `true` | Lint errors + fatal security checks |
+| `fail_on_security` | `true` | Semgrep ERRORs and leaked secrets |
+| `fail_on_vulnerabilities` | `false` | HIGH/CRITICAL dependency CVEs |
+| `fail_on_dead_code` | `false` | Unused code and unused dependencies |
+
+### Secrets
+
+| Secret | Required | Description |
+|------|----------|-------------|
+| `PIPELINE_TOKEN` | No | Only when **this** pipeline repo is private and the caller lives in a different repo. The default `GITHUB_TOKEN` is scoped to the caller and will 403 when checking out the init scripts. |
 
 ---
 
@@ -108,6 +178,33 @@ Handles:
 | Output | Description |
 |------|-------------|
 | `coverage_percent` | Computed JaCoCo LINE coverage percent |
+| `branch_coverage_percent` | Computed JaCoCo BRANCH coverage percent |
+
+---
+
+## Adoption path
+
+The pipeline is deliberately loud but not immediately blocking on the noisy
+checks. A sensible rollout:
+
+1. **Run it as-is.** Lint, formatting, tests and coverage gate from day one;
+   CVEs and dead code report only.
+2. **Triage the dead-code report.** Add suppressions for DI graphs, serializers
+   and Compose previews, then set `fail_on_dead_code: true`.
+3. **Triage the CVE report.** Upgrade or accept each HIGH/CRITICAL, then set
+   `fail_on_vulnerabilities: true`.
+4. **Clear the Kotlin warning backlog**, then set
+   `kotlin_warnings_as_errors: true`.
+5. **Add a branch-coverage floor** with `coverage_branch_threshold`.
+
+For a legacy codebase, `formatting_ratchet_from: origin/main` limits the
+formatting gate to changed files so the first PR is not a whole-repo reformat.
+
+To fix formatting locally:
+
+```bash
+./gradlew -I .pipeline/gradle/spotless.init.gradle spotlessApply
+```
 
 ---
 
@@ -115,20 +212,22 @@ Handles:
 
 The CI pipeline automatically:
 
-1. Generates a **JaCoCo XML report**
-2. Extracts **LINE coverage**
-3. Compares it against the configured threshold
+1. Generates a **JaCoCo XML report** (injected — the caller needs no JaCoCo setup)
+2. Extracts **LINE** and **BRANCH** coverage from the report-level counters
+3. Compares both against their configured thresholds
+4. On pull requests, comments per-file coverage on the changed lines
 
 Example:
 
 ```
-Threshold: 75%
-Actual Coverage: 78.43%
+Line coverage:   78.43% (threshold 75%)
+Branch coverage: 64.10% (threshold 60%)
 
 Result: PASSED
 ```
 
-If coverage is below the threshold, the pipeline **fails automatically**.
+If either figure is below its threshold, the pipeline **fails automatically**.
+The branch gate is off until `coverage_branch_threshold` is set above `0`.
 
 ---
 

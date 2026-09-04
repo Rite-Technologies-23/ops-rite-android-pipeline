@@ -1,0 +1,99 @@
+// gradle/spotless.init.gradle
+// Injects Spotless + ktlint into ANY project WITHOUT modifying the calling repo.
+//
+// This is the "black" of the pipeline: a deterministic formatter with a CI gate.
+//   ./gradlew spotlessCheck   -> fails when formatting differs (CI)
+//   ./gradlew spotlessApply   -> rewrites files (local)
+//
+// Env:
+//   SPOTLESS_VERSION      spotless-plugin-gradle version
+//   KTLINT_VERSION        ktlint engine version
+//   KTLINT_EDITORCONFIG   path to the shared .editorconfig
+//   SPOTLESS_RATCHET_FROM git ref -- when set, only files changed since that ref
+//                         are checked (lets large legacy repos adopt gradually)
+
+def spotlessVersion = System.getenv("SPOTLESS_VERSION") ?: "6.25.0"
+def ktlintVersion   = System.getenv("KTLINT_VERSION")   ?: "1.3.1"
+def ratchetFrom     = System.getenv("SPOTLESS_RATCHET_FROM") ?: ""
+def editorConfig    = System.getenv("KTLINT_EDITORCONFIG") ?: ""
+
+initscript {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "com.diffplug.spotless:spotless-plugin-gradle:" +
+                (System.getenv("SPOTLESS_VERSION") ?: "6.25.0")
+    }
+}
+
+beforeSettings { settings ->
+    settings.dependencyResolutionManagement {
+        repositories {
+            google()
+            mavenCentral()
+            gradlePluginPortal()
+        }
+    }
+}
+
+// Spotless is applied to the root project only and targets the whole tree, so a
+// single spotlessCheck covers every module without per-module wiring.
+rootProject { Project root ->
+
+    root.apply plugin: "com.diffplug.spotless"
+
+    def ktlintEditorConfigOverrides = [
+            "ktlint_standard_no-wildcard-imports"      : "enabled",
+            "ktlint_standard_filename"                 : "enabled",
+            // Compose @Composable functions are PascalCase by convention.
+            "ktlint_standard_function-naming"          : "disabled",
+            "ktlint_function_naming_ignore_when_annotated_with": "Composable, Preview",
+    ]
+
+    root.extensions.configure("spotless") { sp ->
+
+        if (ratchetFrom) {
+            sp.ratchetFrom(ratchetFrom)
+        }
+
+        sp.kotlin { k ->
+            k.target("**/*.kt")
+            k.targetExclude(
+                    "**/build/**",
+                    "**/generated/**",
+                    "**/.gradle/**",
+                    "**/.pipeline/**",
+                    "**/resources/**"
+            )
+            def kt = k.ktlint(ktlintVersion)
+            if (editorConfig && new File(editorConfig).exists()) {
+                kt.setEditorConfigPath(editorConfig)
+            }
+            kt.editorConfigOverride(ktlintEditorConfigOverrides)
+            k.trimTrailingWhitespace()
+            k.endWithNewline()
+        }
+
+        sp.kotlinGradle { k ->
+            k.target("**/*.gradle.kts")
+            k.targetExclude("**/build/**", "**/.gradle/**", "**/.pipeline/**")
+            k.ktlint(ktlintVersion)
+            k.trimTrailingWhitespace()
+            k.endWithNewline()
+        }
+
+        sp.format("misc") { f ->
+            f.target("**/*.md", "**/*.yml", "**/*.yaml")
+            f.targetExclude(
+                    "**/build/**",
+                    "**/.gradle/**",
+                    "**/.git/**",
+                    "**/.pipeline/**"
+            )
+            f.trimTrailingWhitespace()
+            f.endWithNewline()
+        }
+    }
+}
