@@ -1,8 +1,25 @@
-name: "Android CI (Jetpack Compose) - Reusable (JaCoCo)"
+name: "Android CI (Jetpack Compose) - Reusable"
+
+# ---------------------------------------------------------------------------
+# Complete CI for Android/Kotlin, built entirely from free tooling.
+#
+#   Security          Android Lint (fatal security checks) + Semgrep OSS +
+#                     gitleaks + CycloneDX SBOM scanned by Trivy
+#   Dead code         Detekt unused-* rules, Android Lint UnusedResources,
+#                     dependency-analysis buildHealth, Qodana JVM Community
+#   Static typing     kotlinc (strict JSR-305, optional warnings-as-errors)
+#   Lint + format     Detekt (lint) + Spotless/ktlint (format gate)
+#   Tests + coverage  JUnit + JaCoCo with line AND branch thresholds
+#
+# Every tool is injected through a Gradle init script from this repo, so a
+# caller repository needs no build-file changes to adopt the whole pipeline.
+# ---------------------------------------------------------------------------
 
 on:
   workflow_call:
     inputs:
+
+      # ---- core (unchanged contract) ----
       java_version:
         required: true
         type: string
@@ -35,19 +52,157 @@ on:
         type: boolean
         default: true
 
+      # ---- coverage ----
+      coverage_branch_threshold:
+        required: false
+        type: string
+        default: "0"
+        description: "Minimum BRANCH coverage %. 0 disables the branch gate."
+
+      # ---- formatting (the black equivalent) ----
+      run_formatting:
+        required: false
+        type: boolean
+        default: true
+
+      formatting_ratchet_from:
+        required: false
+        type: string
+        default: ""
+        description: >-
+          Git ref (e.g. origin/main). When set, Spotless only checks files changed
+          since that ref, letting a legacy codebase adopt formatting gradually.
+
+      # ---- android lint ----
+      run_android_lint:
+        required: false
+        type: boolean
+        default: true
+
+      lint_check_all_warnings:
+        required: false
+        type: boolean
+        default: false
+        description: "Enable lint checks that are disabled by default. Slower, noisier."
+
+      # ---- dead code (the vulture equivalent) ----
+      run_dead_code:
+        required: false
+        type: boolean
+        default: true
+
+      run_deep_dead_code:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Run Qodana JVM Community for cross-module unused-declaration analysis.
+          Off by default: it adds 5-15 minutes and needs a triaged baseline.
+
+      # ---- security (the bandit equivalent) ----
+      run_security:
+        required: false
+        type: boolean
+        default: true
+
+      run_dependency_audit:
+        required: false
+        type: boolean
+        default: true
+
+      # ---- static typing strictness ----
+      kotlin_warnings_as_errors:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Promote Kotlin compiler warnings to errors. Off by default because it
+          breaks every build on an existing codebase until the backlog is cleared.
+
+      kotlin_jsr305_strict:
+        required: false
+        type: boolean
+        default: true
+        description: "Enforce Java @Nullable/@NonNull annotations at compile time."
+
+      # ---- gates ----
+      fail_on_lint:
+        required: false
+        type: boolean
+        default: true
+
+      fail_on_formatting:
+        required: false
+        type: boolean
+        default: true
+
+      fail_on_android_lint:
+        required: false
+        type: boolean
+        default: true
+
+      fail_on_security:
+        required: false
+        type: boolean
+        default: true
+        description: "Fail on Semgrep ERROR findings and leaked secrets."
+
+      fail_on_vulnerabilities:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Fail on HIGH/CRITICAL CVEs in dependencies. Off by default: a first scan
+          of an existing app almost always has findings. Flip on after triage.
+
+      fail_on_dead_code:
+        required: false
+        type: boolean
+        default: false
+        description: >-
+          Fail on unused code and unused dependencies. Off by default: DI,
+          serialization and Compose codegen produce false positives until the
+          suppression baseline is tuned.
+
+    secrets:
+      PIPELINE_TOKEN:
+        required: false
+        description: >-
+          Only required when THIS pipeline repo is private and the caller lives
+          in a different repo. A read-scoped PAT or GitHub App token; without it
+          the checkout of the init scripts will fail with 403.
+
     outputs:
       coverage_percent:
         description: "Computed JaCoCo LINE coverage percent"
-        value: ${{ jobs.ci.outputs.coverage_percent }}
+        value: ${{ jobs.test.outputs.coverage_percent }}
+
+      branch_coverage_percent:
+        description: "Computed JaCoCo BRANCH coverage percent"
+        value: ${{ jobs.test.outputs.branch_coverage_percent }}
 
 env:
   JAVA_VERSION: ${{ inputs.java_version }}
   BUILD_VARIANT: ${{ inputs.build_variant }}
   COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
+  COVERAGE_BRANCH_THRESHOLD: ${{ inputs.coverage_branch_threshold }}
+
+  # Tool versions, consumed by the Gradle init scripts. Bump them here.
+  DETEKT_VERSION: "1.23.7"
+  DETEKT_COMPOSE_VERSION: "0.4.22"
+  SPOTLESS_VERSION: "6.25.0"
+  KTLINT_VERSION: "1.3.1"
+  DAGP_VERSION: "2.6.1"
+  CYCLONEDX_VERSION: "1.10.0"
+  GITLEAKS_VERSION: "8.21.2"
+  TRIVY_VERSION: "0.58.1"
 
 defaults:
   run:
     shell: bash
+
+permissions:
+  contents: read
 
 concurrency:
   group: android-ci-${{ github.workflow }}-${{ github.ref }}
@@ -55,192 +210,648 @@ concurrency:
 
 jobs:
 
-  ci:
-    name: Reusable CI Pipeline
+  # =========================================================================
+  # 1. LINT + FORMAT  (the pylint + black equivalent)
+  # =========================================================================
+  quality:
+    name: Lint & Format
     runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.run_static_analysis || inputs.run_formatting }}
 
-    outputs:
-      coverage_percent: ${{ steps.coverage.outputs.coverage_percent }}
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Spotless ratchet needs history to diff against the base ref.
+          fetch-depth: ${{ inputs.formatting_ratchet_from != '' && '0' || '1' }}
+
+      - name: Setup Android build environment
+        id: setup
+        uses: Rite-Technologies-23/ops-rite-android-pipeline/.github/actions/setup-android@main
+        with:
+          java_version: ${{ inputs.java_version }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          cache_key_suffix: quality
+
+      # -------------------------------------------------------------------
+      # Formatting gate. spotlessApply is the local fix; spotlessCheck is CI.
+      # -------------------------------------------------------------------
+      - name: Format check (Spotless + ktlint)
+        if: ${{ inputs.run_formatting }}
+        continue-on-error: ${{ !inputs.fail_on_formatting }}
+        env:
+          KTLINT_EDITORCONFIG: ${{ github.workspace }}/.pipeline/.github/tool/.editorconfig
+          SPOTLESS_RATCHET_FROM: ${{ inputs.formatting_ratchet_from }}
+        run: |
+          set -euo pipefail
+
+          # A caller-owned .editorconfig at the repo root always wins.
+          if [ -f ".editorconfig" ]; then
+            echo "Using the caller repo's own .editorconfig"
+            unset KTLINT_EDITORCONFIG
+          fi
+
+          ./gradlew -I .pipeline/gradle/spotless.init.gradle \
+            spotlessCheck --no-daemon --stacktrace
+
+      - name: Formatting hint on failure
+        if: ${{ failure() && inputs.run_formatting }}
+        run: |
+          echo "::notice::Run './gradlew -I .pipeline/gradle/spotless.init.gradle spotlessApply' to fix formatting."
+
+      # -------------------------------------------------------------------
+      # Detekt. Unlike the previous pipeline this is NOT skip-if-absent: the
+      # plugin is injected, so it always runs and always uses the shared config.
+      # -------------------------------------------------------------------
+      - name: Static analysis (Detekt)
+        if: ${{ inputs.run_static_analysis }}
+        continue-on-error: ${{ !inputs.fail_on_lint }}
+        env:
+          DETEKT_CONFIG: ${{ github.workspace }}/.pipeline/.github/tool/detekt.yml
+        run: |
+          set -euo pipefail
+
+          # A caller-owned detekt.yml at the repo root always wins.
+          if [ -f "config/detekt/detekt.yml" ]; then
+            DETEKT_CONFIG="$GITHUB_WORKSPACE/config/detekt/detekt.yml"
+          elif [ -f "detekt.yml" ]; then
+            DETEKT_CONFIG="$GITHUB_WORKSPACE/detekt.yml"
+          fi
+          export DETEKT_CONFIG
+          echo "Detekt config: $DETEKT_CONFIG"
+
+          ./gradlew -I .pipeline/gradle/detekt.init.gradle \
+            detekt --no-daemon --continue --stacktrace
+
+      - name: Summarise Detekt findings
+        if: ${{ always() && inputs.run_static_analysis }}
+        run: |
+          set -euo pipefail
+          bash .pipeline/.github/tool/scripts/lint_summary.sh . | tee detekt-summary.txt
+
+      - name: Upload lint & format reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-lint-format
+          path: |
+            **/build/reports/detekt/
+            detekt-summary.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # =========================================================================
+  # 2. ANDROID LINT  (free Android-specific SAST + dead resources)
+  # =========================================================================
+  android_lint:
+    name: Android Lint
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.run_android_lint }}
 
     steps:
 
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Checkout reusable repo (for init script)
-        uses: actions/checkout@v4
+      - name: Setup Android build environment
+        uses: Rite-Technologies-23/ops-rite-android-pipeline/.github/actions/setup-android@main
         with:
-          repository: Darryl-Cardoza/reusable-repo-android
-          ref: main
-          path: .reusable
+          java_version: ${{ inputs.java_version }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          cache_key_suffix: lint
 
-      - name: Set up JDK
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*','**/settings.gradle*','**/gradle-wrapper.properties','**/gradle.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      # --------------------------------------------------
-      # Install Gradle wrapper dynamically (if jar missing)
-      # --------------------------------------------------
-
-      - name: Install Gradle Wrapper from repo version
+      - name: Run Android Lint
+        continue-on-error: ${{ !inputs.fail_on_android_lint }}
+        env:
+          LINT_ABORT_ON_ERROR: ${{ inputs.fail_on_android_lint }}
+          LINT_CHECK_ALL_WARNINGS: ${{ inputs.lint_check_all_warnings }}
+          LINT_BASELINE: ${{ github.workspace }}/lint-baseline.xml
         run: |
           set -euo pipefail
 
-          WRAPPER_FILE="gradle/wrapper/gradle-wrapper.properties"
+          INIT="-I .pipeline/gradle/android-lint.init.gradle"
 
-          if [ ! -f "$WRAPPER_FILE" ]; then
-            echo "❌ gradle-wrapper.properties not found."
+          # Prefer the variant-specific task; it is roughly half the work of the
+          # all-variants `lint` task.
+          if ./gradlew $INIT tasks --all --no-daemon 2>/dev/null | grep -qE "^lint${BUILD_VARIANT}\b"; then
+            TASK="lint${BUILD_VARIANT}"
+          else
+            TASK="lint"
+          fi
+
+          echo "Running :$TASK"
+          ./gradlew $INIT "$TASK" --no-daemon --continue --stacktrace
+
+      - name: Summarise Android Lint findings
+        if: always()
+        run: |
+          set -euo pipefail
+          bash .pipeline/.github/tool/scripts/android_lint_summary.sh . | tee android-lint-summary.txt
+
+      - name: Upload Android Lint reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-android-lint
+          path: |
+            **/build/reports/lint-results*.*
+            **/build/reports/lint/
+            android-lint-summary.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # =========================================================================
+  # 3. SECURITY  (the bandit equivalent)
+  # =========================================================================
+  security:
+    name: Security Scan
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.run_security || inputs.run_dependency_audit }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # gitleaks scans history, not just the worktree
+
+      - name: Setup Android build environment
+        uses: Rite-Technologies-23/ops-rite-android-pipeline/.github/actions/setup-android@main
+        with:
+          java_version: ${{ inputs.java_version }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          cache_key_suffix: security
+
+      # -------------------------------------------------------------------
+      # 3a. Secret scanning -- gitleaks binary, not the marketplace action.
+      #     The action requires a paid licence key for organisations; the
+      #     binary itself is Apache-2.0 and free.
+      # -------------------------------------------------------------------
+      - name: Install gitleaks
+        if: ${{ inputs.run_security }}
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan for committed secrets
+        if: ${{ inputs.run_security }}
+        continue-on-error: ${{ !inputs.fail_on_security }}
+        run: |
+          set -euo pipefail
+          gitleaks detect \
+            --source . \
+            --config .pipeline/.github/tool/gitleaks.toml \
+            --report-format sarif \
+            --report-path gitleaks.sarif \
+            --redact \
+            --exit-code 1 \
+            --verbose
+
+      # -------------------------------------------------------------------
+      # 3b. SAST -- Semgrep OSS. Registry packs are free and need no token.
+      # -------------------------------------------------------------------
+      - name: Set up Python
+        if: ${{ inputs.run_security }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Semgrep
+        if: ${{ inputs.run_security }}
+        run: python -m pip install --quiet --disable-pip-version-check semgrep
+
+      - name: Run Semgrep (SAST)
+        if: ${{ inputs.run_security }}
+        run: |
+          set -euo pipefail
+
+          # Never fail here -- the gate step below decides, so that a scanner
+          # outage cannot be mistaken for a security finding.
+          semgrep scan \
+            --config p/kotlin \
+            --config p/java \
+            --config p/secrets \
+            --config .pipeline/.github/tool/semgrep/android-rules.yml \
+            --exclude 'build' \
+            --exclude '.pipeline' \
+            --exclude '**/generated/**' \
+            --metrics=off \
+            --json --output semgrep.json \
+            --sarif --sarif-output semgrep.sarif \
+            --no-error || true
+
+          test -f semgrep.json || echo '{"results":[],"errors":[]}' > semgrep.json
+
+      - name: Gate on Semgrep ERROR findings
+        if: ${{ inputs.run_security }}
+        continue-on-error: ${{ !inputs.fail_on_security }}
+        run: |
+          set -euo pipefail
+
+          ERRORS=$(jq '[.results[] | select(.extra.severity == "ERROR")] | length' semgrep.json)
+          WARNS=$(jq  '[.results[] | select(.extra.severity == "WARNING")] | length' semgrep.json)
+
+          echo "Semgrep: ${ERRORS} error(s), ${WARNS} warning(s)"
+
+          if [ "$ERRORS" -gt 0 ]; then
+            jq -r '.results[] | select(.extra.severity == "ERROR")
+                   | "::error file=\(.path),line=\(.start.line)::[\(.check_id)] \(.extra.message | gsub("\n"; " "))"' \
+                   semgrep.json
             exit 1
           fi
 
-          echo "Reading Gradle version from wrapper properties..."
-
-          DIST_URL=$(grep distributionUrl "$WRAPPER_FILE" | cut -d= -f2)
-          GRADLE_VERSION=$(echo "$DIST_URL" | sed -E 's/.*gradle-([0-9.]+)-.*/\1/')
-
-          echo "Detected Gradle version: $GRADLE_VERSION"
-
-          echo "Downloading Gradle $GRADLE_VERSION..."
-          curl -sLo gradle.zip https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
-          unzip -q gradle.zip
-
-          echo "Generating Gradle wrapper using Gradle $GRADLE_VERSION..."
-
-          ./gradle-${GRADLE_VERSION}/bin/gradle wrapper
-
-          chmod +x gradlew
-
-      # --------------------------------------------------
-      # Static Analysis
-      # --------------------------------------------------
-
-      - name: Static analysis (Detekt)
-        if: ${{ inputs.run_static_analysis }}
+      # -------------------------------------------------------------------
+      # 3c. Dependency CVEs. Gradle has no lockfile in most Android projects,
+      #     so an SBOM built from the resolved graph is the reliable free path.
+      # -------------------------------------------------------------------
+      - name: Generate SBOM (CycloneDX)
+        if: ${{ inputs.run_dependency_audit }}
+        continue-on-error: true
         run: |
-          if ./gradlew tasks --all | grep -q '^detekt\b'; then
-            echo "Detekt task found -> running detekt"
-            ./gradlew detekt
-          else
-            echo "Detekt task not found -> skipping"
-          fi
+          set -euo pipefail
+          ./gradlew -I .pipeline/gradle/cyclonedx.init.gradle \
+            cyclonedxBom --no-daemon --stacktrace
+          ls -la build/reports/sbom/ || true
 
-      # --------------------------------------------------
-      # Unit Tests
-      # --------------------------------------------------
+      - name: Install Trivy
+        if: ${{ inputs.run_dependency_audit }}
+        run: |
+          set -euo pipefail
+          curl -sSLo /tmp/trivy.tar.gz \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+          sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
+          trivy --version
 
-      - name: Run Unit Tests
-        if: ${{ inputs.run_tests }}
-        run: ./gradlew test${{ env.BUILD_VARIANT }}UnitTest
-
-      # --------------------------------------------------
-      # Coverage
-      # --------------------------------------------------
-
-      - name: Generate Test Report (JaCoCo)
-        if: ${{ inputs.run_tests && inputs.run_coverage }}
+      - name: Scan dependencies for known CVEs
+        if: ${{ inputs.run_dependency_audit }}
+        continue-on-error: ${{ !inputs.fail_on_vulnerabilities }}
         run: |
           set -euo pipefail
 
-          INIT_SCRIPT=".reusable/gradle/jacoco.init.gradle"
+          SBOM="build/reports/sbom/bom.json"
 
-          if ./gradlew -I "$INIT_SCRIPT" :app:tasks --all | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
-            ./gradlew -I "$INIT_SCRIPT" \
+          if [ ! -f "$SBOM" ]; then
+            echo "::warning::SBOM not generated -- falling back to filesystem scan."
+            trivy fs . --scanners vuln --format table --severity HIGH,CRITICAL --exit-code 0
+            exit 0
+          fi
+
+          trivy sbom "$SBOM" \
+            --format json --output trivy.json \
+            --severity LOW,MEDIUM,HIGH,CRITICAL \
+            --exit-code 0
+
+          trivy sbom "$SBOM" --format table --severity HIGH,CRITICAL --exit-code 0
+
+          COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy.json)
+          echo "Trivy: ${COUNT} HIGH/CRITICAL vulnerabilities"
+
+          if [ "$COUNT" -gt 0 ]; then
+            exit 1
+          fi
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-security
+          path: |
+            semgrep.json
+            gitleaks.sarif
+            trivy.json
+            build/reports/sbom/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # =========================================================================
+  # 4. DEAD CODE  (the vulture equivalent)
+  # =========================================================================
+  dead_code:
+    name: Dead Code Analysis
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.run_dead_code }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android build environment
+        uses: Rite-Technologies-23/ops-rite-android-pipeline/.github/actions/setup-android@main
+        with:
+          java_version: ${{ inputs.java_version }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          cache_key_suffix: deadcode
+
+      # -------------------------------------------------------------------
+      # Unused / misdeclared dependencies.
+      # -------------------------------------------------------------------
+      - name: Unused dependency analysis (buildHealth)
+        continue-on-error: ${{ !inputs.fail_on_dead_code }}
+        env:
+          DAGP_SEVERITY: ${{ inputs.fail_on_dead_code && 'fail' || 'warn' }}
+        run: |
+          set -euo pipefail
+          ./gradlew -I .pipeline/gradle/dependency-analysis.init.gradle \
+            buildHealth --no-daemon --stacktrace
+
+          REPORT="build/reports/dependency-analysis/build-health-report.txt"
+          if [ -f "$REPORT" ]; then
+            echo "----- build health report -----"
+            cat "$REPORT"
+          fi
+
+      # -------------------------------------------------------------------
+      # Cross-module unused declarations. This is the part Detekt cannot do:
+      # Detekt's unused-* rules are single-file scope, Qodana resolves the
+      # whole project graph.
+      # -------------------------------------------------------------------
+      - name: Stage Qodana config
+        if: ${{ inputs.run_deep_dead_code }}
+        run: cp .pipeline/.github/tool/qodana.yaml ./qodana.yaml
+
+      - name: Deep dead-code analysis (Qodana JVM Community)
+        if: ${{ inputs.run_deep_dead_code }}
+        continue-on-error: ${{ !inputs.fail_on_dead_code }}
+        uses: JetBrains/qodana-action@v2024.3.4
+        with:
+          pr-mode: false
+          post-pr-comment: false
+          use-caches: true
+          upload-result: true
+
+      - name: Upload dead-code reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reports-dead-code
+          path: |
+            build/reports/dependency-analysis/
+            ${{ runner.temp }}/qodana/results/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # =========================================================================
+  # 5. TESTS + COVERAGE
+  # =========================================================================
+  test:
+    name: Unit Tests & Coverage
+    runs-on: ${{ inputs.runner }}
+    if: ${{ inputs.run_tests }}
+
+    outputs:
+      coverage_percent: ${{ steps.coverage.outputs.coverage_percent }}
+      branch_coverage_percent: ${{ steps.coverage.outputs.branch_coverage_percent }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android build environment
+        uses: Rite-Technologies-23/ops-rite-android-pipeline/.github/actions/setup-android@main
+        with:
+          java_version: ${{ inputs.java_version }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          cache_key_suffix: test
+
+      # Strict typing is applied here: this is the job that compiles first.
+      - name: Run Unit Tests
+        env:
+          KOTLIN_WARNINGS_AS_ERRORS: ${{ inputs.kotlin_warnings_as_errors }}
+          KOTLIN_JSR305_STRICT: ${{ inputs.kotlin_jsr305_strict }}
+        run: |
+          set -euo pipefail
+          ./gradlew -I .pipeline/gradle/kotlin-strict.init.gradle \
+            "test${BUILD_VARIANT}UnitTest" --no-daemon --stacktrace
+
+      - name: Generate Coverage Report (JaCoCo)
+        if: ${{ inputs.run_coverage }}
+        env:
+          KOTLIN_WARNINGS_AS_ERRORS: ${{ inputs.kotlin_warnings_as_errors }}
+          KOTLIN_JSR305_STRICT: ${{ inputs.kotlin_jsr305_strict }}
+        run: |
+          set -euo pipefail
+
+          INIT_SCRIPT=".pipeline/gradle/jacoco.init.gradle"
+          STRICT=".pipeline/gradle/kotlin-strict.init.gradle"
+
+          if ./gradlew -I "$INIT_SCRIPT" :app:tasks --all --no-daemon | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
+            ./gradlew -I "$INIT_SCRIPT" -I "$STRICT" \
               clean \
               ":app:test${BUILD_VARIANT}UnitTest" \
               :app:jacocoTestReport \
               "-PcoverageVariant=${BUILD_VARIANT}" \
-              --rerun-tasks --no-build-cache
+              --rerun-tasks --no-build-cache --no-daemon
           else
-            echo ":app:jacocoTestReport NOT found."
+            echo "::error::':app:jacocoTestReport' not found."
             exit 1
           fi
 
-      - name: Check Coverage Threshold
+      - name: Check Coverage Thresholds
         id: coverage
-        if: ${{ inputs.run_tests && inputs.run_coverage }}
+        if: ${{ inputs.run_coverage }}
         run: |
           set -euo pipefail
 
           XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
 
           if [ ! -f "$XML" ]; then
-            echo "JaCoCo XML not found"
+            echo "::error::JaCoCo XML not found at $XML"
             exit 1
           fi
 
-          LINE_COUNTER=$(grep -oP '<counter type="LINE" missed="[0-9]+" covered="[0-9]+"\s*/>' "$XML" | tail -1)
+          # The report-level counters are the LAST ones in the document, after
+          # every package element.
+          read_counter () {
+            local type="$1" attr="$2"
+            grep -oP "<counter type=\"${type}\" missed=\"[0-9]+\" covered=\"[0-9]+\"\\s*/>" "$XML" \
+              | tail -1 \
+              | grep -oP "${attr}=\"\\K[0-9]+" || echo ""
+          }
 
-          MISSED=$(echo "$LINE_COUNTER" | grep -oP 'missed="\K[0-9]+')
-          COVERED=$(echo "$LINE_COUNTER" | grep -oP 'covered="\K[0-9]+')
+          pct () {
+            local missed="$1" covered="$2"
+            local total=$((missed + covered))
+            if [ "$total" -eq 0 ]; then
+              echo "0.00"
+            else
+              awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.2f", (c/t)*100 }'
+            fi
+          }
 
-          TOTAL=$((MISSED + COVERED))
-          PCT=$(awk -v c="$COVERED" -v t="$TOTAL" 'BEGIN { printf "%.2f", (c/t)*100 }')
+          LINE_MISSED=$(read_counter LINE missed)
+          LINE_COVERED=$(read_counter LINE covered)
 
-          echo "coverage_percent=$PCT" >> "$GITHUB_OUTPUT"
-
-          PASS=$(awk -v p="$PCT" -v th="$COVERAGE_THRESHOLD" 'BEGIN { print (p+0 >= th+0) ? "1" : "0" }')
-
-          if [ "$PASS" -ne 1 ]; then
-            echo "Coverage ${PCT}% is below threshold ${COVERAGE_THRESHOLD}%"
+          if [ -z "$LINE_MISSED" ] || [ -z "$LINE_COVERED" ]; then
+            echo "::error::Could not read LINE counters from the JaCoCo report."
             exit 1
           fi
 
-      # --------------------------------------------------
-      # Build
-      # --------------------------------------------------
+          LINE_PCT=$(pct "$LINE_MISSED" "$LINE_COVERED")
+
+          BRANCH_MISSED=$(read_counter BRANCH missed)
+          BRANCH_COVERED=$(read_counter BRANCH covered)
+          if [ -n "$BRANCH_MISSED" ] && [ -n "$BRANCH_COVERED" ]; then
+            BRANCH_PCT=$(pct "$BRANCH_MISSED" "$BRANCH_COVERED")
+          else
+            BRANCH_PCT="0.00"
+          fi
+
+          echo "coverage_percent=$LINE_PCT"          >> "$GITHUB_OUTPUT"
+          echo "branch_coverage_percent=$BRANCH_PCT" >> "$GITHUB_OUTPUT"
+
+          echo "Line coverage:   ${LINE_PCT}% (threshold ${COVERAGE_THRESHOLD}%)"
+          echo "Branch coverage: ${BRANCH_PCT}% (threshold ${COVERAGE_BRANCH_THRESHOLD}%)"
+
+          FAILED=0
+
+          if awk -v p="$LINE_PCT" -v th="$COVERAGE_THRESHOLD" 'BEGIN { exit !(p+0 < th+0) }'; then
+            echo "::error::Line coverage ${LINE_PCT}% is below threshold ${COVERAGE_THRESHOLD}%"
+            FAILED=1
+          fi
+
+          if awk -v th="$COVERAGE_BRANCH_THRESHOLD" 'BEGIN { exit !(th+0 > 0) }'; then
+            if awk -v p="$BRANCH_PCT" -v th="$COVERAGE_BRANCH_THRESHOLD" 'BEGIN { exit !(p+0 < th+0) }'; then
+              echo "::error::Branch coverage ${BRANCH_PCT}% is below threshold ${COVERAGE_BRANCH_THRESHOLD}%"
+              FAILED=1
+            fi
+          fi
+
+          exit "$FAILED"
+
+      - name: Summarise test results
+        if: always()
+        run: |
+          set -euo pipefail
+          bash .pipeline/.github/tool/scripts/junit_summary.sh . | tee junit-summary.txt
+
+      # Per-file coverage on the changed lines, as a PR comment.
+      - name: Comment coverage on PR
+        if: ${{ always() && inputs.run_coverage && github.event_name == 'pull_request' }}
+        continue-on-error: true
+        uses: madrapps/jacoco-report@v1.7.1
+        with:
+          paths: app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml
+          token: ${{ github.token }}
+          min-coverage-overall: ${{ inputs.coverage_threshold }}
+          min-coverage-changed-files: ${{ inputs.coverage_threshold }}
+          title: "JaCoCo Coverage"
+          update-comment: true
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports-${{ inputs.build_variant }}
+          path: |
+            app/build/reports/tests/
+            app/build/test-results/
+            junit-summary.txt
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload JaCoCo reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jacoco-reports-${{ inputs.build_variant }}
+          path: app/build/reports/jacoco/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # =========================================================================
+  # 6. BUILD  (artifact contract consumed by release.yml)
+  # =========================================================================
+  build:
+    name: Build APK & AAB
+    runs-on: ${{ inputs.runner }}
+    needs: [test]
+    # Still build when tests are disabled by input, but never when they failed.
+    if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Android build environment
+        uses: Rite-Technologies-23/ops-rite-android-pipeline/.github/actions/setup-android@main
+        with:
+          java_version: ${{ inputs.java_version }}
+          pipeline_token: ${{ secrets.PIPELINE_TOKEN }}
+          cache_key_suffix: build
 
       - name: Build APK
-        run: ./gradlew assemble${{ env.BUILD_VARIANT }}
+        env:
+          KOTLIN_WARNINGS_AS_ERRORS: ${{ inputs.kotlin_warnings_as_errors }}
+          KOTLIN_JSR305_STRICT: ${{ inputs.kotlin_jsr305_strict }}
+        run: |
+          ./gradlew -I .pipeline/gradle/kotlin-strict.init.gradle \
+            "assemble${BUILD_VARIANT}" --no-daemon --stacktrace
 
       - name: Build AAB
-        run: ./gradlew bundle${{ env.BUILD_VARIANT }}
+        env:
+          KOTLIN_WARNINGS_AS_ERRORS: ${{ inputs.kotlin_warnings_as_errors }}
+          KOTLIN_JSR305_STRICT: ${{ inputs.kotlin_jsr305_strict }}
+        run: |
+          ./gradlew -I .pipeline/gradle/kotlin-strict.init.gradle \
+            "bundle${BUILD_VARIANT}" --no-daemon --stacktrace
 
-      # --------------------------------------------------
-      # Artifacts
-      # --------------------------------------------------
-
+      # Artifact name is a contract with release.yml -- do not rename.
       - name: Upload APK/AAB outputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: android-build-outputs-${{ env.BUILD_VARIANT }}
+          name: android-build-outputs-${{ inputs.build_variant }}
           path: |
             app/build/outputs/apk/
             app/build/outputs/bundle/
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Upload Test Reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-reports-${{ env.BUILD_VARIANT }}
-          path: |
-            app/build/reports/tests/
-            app/build/test-results/
+  # =========================================================================
+  # 7. SUMMARY  (aggregated job summary -- wires up the tool/scripts)
+  # =========================================================================
+  summary:
+    name: CI Summary
+    runs-on: ${{ inputs.runner }}
+    needs: [quality, android_lint, security, dead_code, test, build]
+    if: ${{ always() }}
 
-      - name: Upload JaCoCo Reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: jacoco-reports-${{ env.BUILD_VARIANT }}
-          path: app/build/reports/jacoco/
+    steps:
 
-      - name: Upload Detekt Reports
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: Checkout pipeline scripts
+        uses: actions/checkout@v4
         with:
-          name: detekt-reports
-          path: |
-            app/build/reports/detekt/
-            build/reports/detekt/
+          repository: Rite-Technologies-23/ops-rite-android-pipeline
+          path: .pipeline
+          token: ${{ secrets.PIPELINE_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Download all reports
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+          merge-multiple: false
+
+      - name: Compose job summary
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          ANDROID_LINT_RESULT: ${{ needs.android_lint.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+          DEAD_CODE_RESULT: ${{ needs.dead_code.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          COVERAGE_PERCENT: ${{ needs.test.outputs.coverage_percent }}
+          BRANCH_COVERAGE_PERCENT: ${{ needs.test.outputs.branch_coverage_percent }}
+          COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
+          COVERAGE_BRANCH_THRESHOLD: ${{ inputs.coverage_branch_threshold }}
+        run: bash .pipeline/.github/tool/scripts/generate_summary_md.sh reports

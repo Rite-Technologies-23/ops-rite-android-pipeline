@@ -1,0 +1,125 @@
+# Android/Kotlin Semgrep rules that complement the public registry packs
+# (p/kotlin, p/java, p/secrets). These target mistakes Android Lint does not
+# catch, because they live in Kotlin source rather than the manifest.
+#
+# Semgrep OSS is free and these run fully offline once the registry packs are
+# cached; no account or token is required.
+rules:
+  - id: android-webview-file-access
+    languages: [kotlin, java]
+    severity: ERROR
+    message: >-
+      WebView allows local file access. Combined with JavaScript this lets a
+      compromised page read app-private files. Set allowFileAccess = false.
+    pattern-either:
+      - pattern: $S.setAllowFileAccess(true)
+      - pattern: $S.allowFileAccess = true
+      - pattern: $S.setAllowFileAccessFromFileURLs(true)
+      - pattern: $S.allowFileAccessFromFileURLs = true
+      - pattern: $S.setAllowUniversalAccessFromFileURLs(true)
+      - pattern: $S.allowUniversalAccessFromFileURLs = true
+
+  - id: android-webview-javascript-interface
+    languages: [kotlin, java]
+    severity: WARNING
+    message: >-
+      addJavascriptInterface exposes native methods to page JavaScript. Only use
+      it with content you fully control, and annotate exposed methods with
+      @JavascriptInterface.
+    pattern: $W.addJavascriptInterface(...)
+
+  - id: android-ecb-mode-cipher
+    languages: [kotlin, java]
+    severity: ERROR
+    message: >-
+      ECB mode leaks plaintext structure, and DES/RC4/Blowfish are broken. Use
+      AES/GCM/NoPadding with a unique IV per message.
+    pattern-regex: 'Cipher\.getInstance\(\s*"[^"]*(ECB|DES|RC2|RC4|Blowfish)[^"]*"'
+
+  - id: android-hardcoded-crypto-key
+    languages: [kotlin, java]
+    severity: ERROR
+    message: >-
+      Cryptographic key material appears to be hardcoded. Store keys in the
+      Android Keystore, never in source or resources.
+    pattern-either:
+      - pattern: SecretKeySpec("...", ...)
+      - pattern: IvParameterSpec("...".toByteArray(...), ...)
+
+  - id: android-cleartext-http-url
+    languages: [kotlin, java]
+    severity: WARNING
+    message: >-
+      Cleartext http:// endpoint in source. Use https:// -- cleartext traffic is
+      blocked by default on API 28+ and is trivially interceptable.
+    pattern-regex: '"http://(?!localhost|127\.0\.0\.1|10\.0\.2\.2)[^"]+"'
+
+  - id: android-logging-sensitive-data
+    languages: [kotlin, java]
+    severity: WARNING
+    message: >-
+      Potentially sensitive value written to logcat. Any app holding READ_LOGS,
+      and every crash reporter, can read this.
+    patterns:
+      - pattern-either:
+          - pattern: Log.$LEVEL(..., $MSG, ...)
+          - pattern: println($MSG)
+      - metavariable-regex:
+          metavariable: $MSG
+          regex: (?i).*(password|passwd|token|secret|apikey|api_key|authorization|bearer|credential|session).*
+
+  - id: android-external-storage-for-private-data
+    languages: [kotlin, java]
+    severity: WARNING
+    message: >-
+      World-readable external storage used for app data. Prefer filesDir or
+      EncryptedFile in internal storage.
+    pattern-either:
+      - pattern: Environment.getExternalStorageDirectory(...)
+      - pattern: $C.getExternalStoragePublicDirectory(...)
+
+  - id: android-trust-all-certificates
+    languages: [kotlin, java]
+    severity: ERROR
+    message: >-
+      TrustManager accepts every certificate, disabling TLS validation entirely
+      and making every request trivially MITM-able.
+    patterns:
+      - pattern-inside: |
+          object : X509TrustManager {
+            ...
+          }
+      - pattern: |
+          override fun checkServerTrusted(...) {
+          }
+
+  - id: android-hostname-verifier-allow-all
+    languages: [kotlin, java]
+    severity: ERROR
+    message: >-
+      Hostname verification is disabled. The certificate is no longer bound to
+      the host you think you are talking to.
+    pattern-either:
+      - pattern: $B.hostnameVerifier { $H, $S -> true }
+      - pattern: $B.setHostnameVerifier(ALLOW_ALL_HOSTNAME_VERIFIER)
+
+  - id: android-pending-intent-mutable
+    languages: [kotlin, java]
+    severity: ERROR
+    message: >-
+      Mutable PendingIntent can be rewritten by the receiving app. Use
+      FLAG_IMMUTABLE unless mutability is genuinely required.
+    pattern-either:
+      - pattern: PendingIntent.getActivity(..., PendingIntent.FLAG_MUTABLE, ...)
+      - pattern: PendingIntent.getService(..., PendingIntent.FLAG_MUTABLE, ...)
+      - pattern: PendingIntent.getBroadcast(..., PendingIntent.FLAG_MUTABLE, ...)
+
+  - id: android-sql-string-concatenation
+    languages: [kotlin, java]
+    severity: ERROR
+    message: >-
+      SQL built by string concatenation. Use parameterised queries -- Room
+      @Query bind arguments or rawQuery with selectionArgs.
+    pattern-either:
+      - pattern-regex: 'rawQuery\(\s*"[^"]*"\s*\+'
+      - pattern-regex: 'execSQL\(\s*"[^"]*"\s*\+'

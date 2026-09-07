@@ -85,6 +85,9 @@ on:
       ESPER_API_KEY:
         required: false
 
+      PIPELINE_TOKEN:
+        required: false
+
     outputs:
       coverage_percent:
         description: "Computed JaCoCo LINE coverage percent from CI"
@@ -110,6 +113,8 @@ jobs:
       java_version: ${{ inputs.java_version }}
       build_variant: ${{ inputs.build_variant }}
       coverage_threshold: ${{ inputs.coverage_threshold }}
+    secrets:
+      PIPELINE_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
 
   create_release:
     name: Create GitHub Release

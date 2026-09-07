@@ -1,0 +1,47 @@
+// gradle/dependency-analysis.init.gradle
+// Injects the Dependency Analysis Gradle Plugin WITHOUT modifying the calling repo.
+//
+// This is the dependency-level half of dead-code analysis: it reports declared
+// dependencies that are never used, dependencies used but not declared, and
+// api/implementation misclassifications.
+//
+//   ./gradlew buildHealth   -> build/reports/dependency-analysis/build-health-report.txt
+//
+// It is a SETTINGS plugin, so it must be applied in beforeSettings {}.
+
+def dagpVersion = System.getenv("DAGP_VERSION") ?: "2.6.1"
+
+initscript {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "com.autonomousapps:dependency-analysis-gradle-plugin:" +
+                (System.getenv("DAGP_VERSION") ?: "2.6.1")
+    }
+}
+
+beforeSettings { settings ->
+    settings.dependencyResolutionManagement {
+        repositories {
+            google()
+            mavenCentral()
+            gradlePluginPortal()
+        }
+    }
+    settings.pluginManager.apply("com.autonomousapps.dependency-analysis")
+}
+
+gradle.rootProject { Project root ->
+    root.pluginManager.withPlugin("com.autonomousapps.dependency-analysis") {
+        root.extensions.configure("dependencyAnalysis") { ext ->
+            // Report-only by default; the CI job decides whether to fail.
+            ext.issues { issues ->
+                issues.all { project ->
+                    project.onAny { it.severity((System.getenv("DAGP_SEVERITY") ?: "warn")) }
+                }
+            }
+        }
+    }
+}

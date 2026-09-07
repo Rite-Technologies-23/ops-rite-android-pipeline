@@ -1,0 +1,53 @@
+// gradle/cyclonedx.init.gradle
+// Injects the CycloneDX SBOM generator WITHOUT modifying the calling repo.
+//
+//   ./gradlew cyclonedxBom  -> build/reports/sbom/bom.json (+ bom.xml)
+//
+// The SBOM is what Trivy scans for known CVEs. Gradle has no lockfile in most
+// Android projects, so an SBOM built from the resolved dependency graph is the
+// only reliable free way to get a CVE gate in-CI.
+
+def cyclonedxVersion = System.getenv("CYCLONEDX_VERSION") ?: "1.10.0"
+
+initscript {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "org.cyclonedx:cyclonedx-gradle-plugin:" +
+                (System.getenv("CYCLONEDX_VERSION") ?: "1.10.0")
+    }
+}
+
+beforeSettings { settings ->
+    settings.dependencyResolutionManagement {
+        repositories {
+            google()
+            mavenCentral()
+            gradlePluginPortal()
+        }
+    }
+}
+
+rootProject { Project root ->
+
+    root.apply plugin: "org.cyclonedx.bom"
+
+    def variant = (System.getenv("BUILD_VARIANT") ?: "Debug")
+    def variantLower = variant.substring(0, 1).toLowerCase() + variant.substring(1)
+
+    root.tasks.named("cyclonedxBom").configure { t ->
+        t.setOutputName("bom")
+        t.setOutputFormat("all")
+        t.setDestination(root.file("build/reports/sbom"))
+        t.setIncludeBomSerialNumber(false)
+        t.setSkipConfigs(["lintClassPath", "kapt*", "ksp*", "detekt*", "spotless*"])
+        // Runtime graph of the variant under build -- that is what actually ships.
+        t.setIncludeConfigs([
+                "${variantLower}RuntimeClasspath".toString(),
+                "releaseRuntimeClasspath",
+                "runtimeClasspath",
+        ])
+    }
+}

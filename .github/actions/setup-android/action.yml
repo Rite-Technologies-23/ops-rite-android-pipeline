@@ -1,47 +1,188 @@
-name: "Setup Android Environment"
-description: "Installs and configures Android SDK, platform tools, and verifies environment setup."
+name: "Setup Android Build Environment"
+description: >-
+  Shared setup for every CI job: resolves and checks out the pipeline repo (for
+  init scripts and tool configs), installs the JDK, restores the Gradle cache and
+  bootstraps the Gradle wrapper. Optionally installs the Android SDK for
+  self-hosted runners.
 
 inputs:
   java_version:
     required: true
-    description: "Java version to install (e.g., 17)"
+    description: "Java version to install (e.g. 17)"
+
+  cache_key_suffix:
+    required: false
+    default: "shared"
+    description: >-
+      Distinguishes cache entries between jobs. Jobs that write very different
+      Gradle state (e.g. lint vs unit test) should use different suffixes.
+
+  fetch_pipeline:
+    required: false
+    default: "true"
+    description: "Check out this pipeline repo into .pipeline for init scripts and configs"
+
+  pipeline_token:
+    required: false
+    default: ""
+    description: >-
+      Token used to check out the pipeline repo. Only needed when the pipeline
+      repo is PRIVATE and the caller lives in a different repo -- the default
+      GITHUB_TOKEN is scoped to the caller repo and will 403. Supply a PAT or a
+      GitHub App token with read access to the pipeline repo.
+
+  install_sdk:
+    required: false
+    default: "false"
+    description: >-
+      Install the Android SDK. GitHub-hosted ubuntu runners ship it already, so
+      this is only needed on self-hosted runners.
+
+  bootstrap_wrapper:
+    required: false
+    default: "true"
+    description: "Generate the Gradle wrapper if the caller repo is missing gradle-wrapper.jar"
+
+outputs:
+  pipeline_dir:
+    description: "Directory the pipeline repo was checked out into"
+    value: ${{ steps.resolve.outputs.dir }}
+
+  pipeline_ref:
+    description: "Ref of the pipeline repo that was checked out"
+    value: ${{ steps.resolve.outputs.ref }}
 
 runs:
   using: "composite"
   steps:
-    - name: Checkout Repository
+
+    # ----------------------------------------------------------------------
+    # Resolve which pipeline repo/ref this workflow came from.
+    #
+    # github.repository is the CALLER inside a reusable workflow, so it cannot
+    # be used here. github.workflow_ref carries the owning repo and ref of the
+    # workflow file itself, which guarantees the init scripts always match the
+    # workflow version being executed -- no drift, and no third-party repo in
+    # the supply chain.
+    # ----------------------------------------------------------------------
+    - name: Resolve pipeline source
+      id: resolve
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        WORKFLOW_REF="${GITHUB_WORKFLOW_REF:-}"
+
+        if [ -n "$WORKFLOW_REF" ]; then
+          PIPELINE_REPO="${WORKFLOW_REF%%/.github/*}"
+          PIPELINE_REF="${WORKFLOW_REF##*@}"
+        else
+          PIPELINE_REPO="Rite-Technologies-23/ops-rite-android-pipeline"
+          PIPELINE_REF="main"
+        fi
+
+        echo "repo=$PIPELINE_REPO" >> "$GITHUB_OUTPUT"
+        echo "ref=$PIPELINE_REF"   >> "$GITHUB_OUTPUT"
+        echo "dir=.pipeline"       >> "$GITHUB_OUTPUT"
+
+        echo "Pipeline source: $PIPELINE_REPO@$PIPELINE_REF"
+
+    - name: Checkout pipeline repo
+      if: ${{ inputs.fetch_pipeline == 'true' }}
       uses: actions/checkout@v4
+      with:
+        repository: ${{ steps.resolve.outputs.repo }}
+        ref: ${{ steps.resolve.outputs.ref }}
+        path: ${{ steps.resolve.outputs.dir }}
+        token: ${{ inputs.pipeline_token != '' && inputs.pipeline_token || github.token }}
+        persist-credentials: false
 
     - name: Install Java (Temurin)
       uses: actions/setup-java@v4
       with:
-        distribution: 'temurin'
+        distribution: temurin
         java-version: ${{ inputs.java_version }}
-        cache: gradle
+
+    - name: Cache Gradle
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.gradle/caches
+          ~/.gradle/wrapper
+        key: ${{ runner.os }}-gradle-${{ inputs.cache_key_suffix }}-${{ hashFiles('**/*.gradle*','**/settings.gradle*','**/gradle-wrapper.properties','**/gradle.properties','**/libs.versions.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-gradle-${{ inputs.cache_key_suffix }}-
+          ${{ runner.os }}-gradle-
 
     - name: Install Android SDK
+      if: ${{ inputs.install_sdk == 'true' }}
       shell: bash
-      run: bash $GITHUB_ACTION_PATH/install_sdk.sh
+      run: bash "$GITHUB_ACTION_PATH/install_sdk.sh"
 
-    - name: Verify Environment Setup
+    - name: Verify environment
+      if: ${{ inputs.install_sdk == 'true' }}
       shell: bash
-      run: bash $GITHUB_ACTION_PATH/verify_env.sh
+      run: bash "$GITHUB_ACTION_PATH/verify_env.sh"
 
-    - name: Ensure Gradlew Executable & Wrapper Exists
+    # ----------------------------------------------------------------------
+    # Bootstrap the wrapper NON-DESTRUCTIVELY: the caller's declared Gradle
+    # version always wins. We only generate a wrapper when the jar is genuinely
+    # missing, and we never rewrite gradle-wrapper.properties.
+    # ----------------------------------------------------------------------
+    - name: Bootstrap Gradle wrapper
+      if: ${{ inputs.bootstrap_wrapper == 'true' }}
       shell: bash
       run: |
-        chmod +x gradlew || true
-        if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
-          echo "⚙️ Gradle wrapper not found — generating..."
-          gradle wrapper --gradle-version 8.7
-          chmod +x gradlew
+        set -euo pipefail
+
+        WRAPPER_PROPS="gradle/wrapper/gradle-wrapper.properties"
+        WRAPPER_JAR="gradle/wrapper/gradle-wrapper.jar"
+
+        if [ ! -f "$WRAPPER_PROPS" ]; then
+          echo "::error::$WRAPPER_PROPS not found. The caller repo must declare its Gradle version."
+          exit 1
         fi
 
-        echo "✅ Gradle wrapper verified."
+        if [ -f "gradlew" ] && [ -f "$WRAPPER_JAR" ]; then
+          chmod +x gradlew
+          echo "Gradle wrapper already present -> $(./gradlew --version | grep -m1 Gradle || true)"
+          exit 0
+        fi
 
-    - name: Confirm Android SDK Path
+        DIST_URL=$(grep '^distributionUrl' "$WRAPPER_PROPS" | cut -d= -f2-)
+        GRADLE_VERSION=$(echo "$DIST_URL" | sed -E 's/.*gradle-([0-9]+(\.[0-9]+)*)-.*/\1/')
+
+        if [ -z "$GRADLE_VERSION" ]; then
+          echo "::error::Could not parse a Gradle version out of: $DIST_URL"
+          exit 1
+        fi
+
+        echo "Wrapper jar missing -> generating wrapper for Gradle $GRADLE_VERSION"
+
+        TMP_DIR="$(mktemp -d)"
+        curl -sSLo "$TMP_DIR/gradle.zip" \
+          "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+        unzip -q "$TMP_DIR/gradle.zip" -d "$TMP_DIR"
+
+        "$TMP_DIR/gradle-${GRADLE_VERSION}/bin/gradle" wrapper \
+          --gradle-version "$GRADLE_VERSION" \
+          --no-daemon
+
+        chmod +x gradlew
+        rm -rf "$TMP_DIR"
+
+        echo "Gradle wrapper ready."
+
+    - name: Configure Gradle for CI
       shell: bash
       run: |
-        echo "ANDROID_HOME: $ANDROID_HOME"
-        echo "JAVA_HOME: $JAVA_HOME"
-        echo "✅ Android SDK setup complete."
+        set -euo pipefail
+        mkdir -p ~/.gradle
+        {
+          echo "org.gradle.daemon=false"
+          echo "org.gradle.parallel=true"
+          echo "org.gradle.caching=true"
+          echo "org.gradle.configureondemand=false"
+          echo "kotlin.incremental=false"
+        } >> ~/.gradle/gradle.properties
+        echo "Gradle CI defaults applied."

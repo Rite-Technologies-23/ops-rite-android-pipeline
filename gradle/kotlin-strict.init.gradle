@@ -1,0 +1,47 @@
+// gradle/kotlin-strict.init.gradle
+// Tightens the Kotlin compiler WITHOUT modifying the calling repo.
+//
+// Kotlin's compiler is already the pipeline's type checker (the mypy equivalent),
+// but two defaults make it weaker than it needs to be:
+//   1. Warnings are not errors -- deprecations and unchecked casts slide through.
+//   2. Java interop produces platform types, which bypass null-safety entirely.
+//
+// Env:
+//   KOTLIN_WARNINGS_AS_ERRORS  "true"/"false" (default false -- turning this on for
+//                              an existing codebase breaks every build until the
+//                              backlog is cleared)
+//   KOTLIN_JSR305_STRICT       "true"/"false" (default true -- makes @Nullable /
+//                              @NonNull annotated Java APIs enforce at compile time)
+
+def warningsAsErrors = (System.getenv("KOTLIN_WARNINGS_AS_ERRORS") ?: "false").toBoolean()
+def jsr305Strict     = (System.getenv("KOTLIN_JSR305_STRICT") ?: "true").toBoolean()
+
+allprojects { Project p ->
+
+    p.tasks.matching { it.class.name.contains("KotlinCompile") }.configureEach { t ->
+
+        def extraArgs = []
+        if (jsr305Strict) {
+            extraArgs << "-Xjsr305=strict"
+        }
+
+        // Kotlin 2.x prefers compilerOptions; kotlinOptions still works but is
+        // deprecated. Try the modern API first and fall back.
+        try {
+            def opts = t.compilerOptions
+            if (warningsAsErrors) {
+                opts.allWarningsAsErrors.set(true)
+            }
+            extraArgs.each { arg -> opts.freeCompilerArgs.add(arg) }
+        } catch (Exception ignored) {
+            try {
+                if (warningsAsErrors) {
+                    t.kotlinOptions.allWarningsAsErrors = true
+                }
+                t.kotlinOptions.freeCompilerArgs += extraArgs
+            } catch (Exception ignoredToo) {
+                p.logger.lifecycle("kotlin-strict.init.gradle: could not configure ${t.path}")
+            }
+        }
+    }
+}

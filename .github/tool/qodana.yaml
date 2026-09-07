@@ -1,0 +1,45 @@
+# Qodana JVM Community configuration -- free, no licence key, runs in Docker.
+#
+# This is the pipeline's cross-module dead-code detector: Qodana's
+# UnusedDeclaration inspection resolves the whole project graph, so it finds
+# unused public classes and functions that Detekt (single-file scope) cannot.
+# It is the closest free equivalent to Python's vulture.
+#
+# Copied into the caller repo at CI time by the dead-code job.
+version: "1.0"
+linter: jetbrains/qodana-jvm-community:2024.3
+
+profile:
+  name: qodana.recommended
+
+include:
+  # --- dead code (the vulture equivalent) ---
+  - name: UnusedDeclaration
+  - name: UnusedSymbol
+  - name: KotlinUnusedImport
+  - name: UnusedReceiverParameter
+  - name: RedundantVisibilityModifier
+  - name: CanBeVal
+  # --- correctness ---
+  - name: KotlinConstantConditions
+  - name: NullChecksToSafeCall
+
+exclude:
+  - name: All
+    paths:
+      - build
+      - .gradle
+      - .pipeline
+      - "**/generated"
+      - "**/src/test"
+      - "**/src/androidTest"
+  # DI graphs, serializers and Compose previews are referenced by generated code
+  # or by tooling, so "unused" is a false positive for them.
+  - name: UnusedDeclaration
+    paths:
+      - "**/di"
+      - "**/preview"
+
+# Report-only by default. Raise this once the baseline is triaged, or commit a
+# qodana.sarif.json baseline and flip fail_on_dead_code in the workflow.
+failThreshold: 0
