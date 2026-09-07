@@ -30,9 +30,13 @@ beforeSettings { settings ->
     }
 }
 
+import org.cyclonedx.gradle.CycloneDxPlugin
+
 rootProject { Project root ->
 
-    root.apply plugin: "org.cyclonedx.bom"
+    // Applied by class -- apply plugin: "org.cyclonedx.bom" throws
+    // UnknownPluginException from an initscript-only classpath (see spotless.init.gradle).
+    root.pluginManager.apply(CycloneDxPlugin)
 
     def variant = (System.getenv("BUILD_VARIANT") ?: "Debug")
     def variantLower = variant.substring(0, 1).toLowerCase() + variant.substring(1)

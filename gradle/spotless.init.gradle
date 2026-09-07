@@ -28,6 +28,8 @@ initscript {
     }
 }
 
+import com.diffplug.gradle.spotless.SpotlessPlugin
+
 beforeSettings { settings ->
     settings.dependencyResolutionManagement {
         repositories {
@@ -42,7 +44,10 @@ beforeSettings { settings ->
 // single spotlessCheck covers every module without per-module wiring.
 rootProject { Project root ->
 
-    root.apply plugin: "com.diffplug.spotless"
+    // Applied by class, not by id -- "apply plugin: 'com.diffplug.spotless'" throws
+    // UnknownPluginException here even though the classpath dependency above resolves
+    // fine, because the id->class marker lookup doesn't reliably see initscript classpaths.
+    root.pluginManager.apply(SpotlessPlugin)
 
     def ktlintEditorConfigOverrides = [
             "ktlint_standard_no-wildcard-imports"      : "enabled",

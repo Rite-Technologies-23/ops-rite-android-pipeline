@@ -20,6 +20,8 @@ initscript {
     }
 }
 
+import io.gitlab.arturbosch.detekt.DetektPlugin
+
 // Detekt resolves detekt-cli + rule plugins from PROJECT repositories. Modern Android
 // builds often set RepositoriesMode.FAIL_ON_PROJECT_REPOS, so inject at the settings
 // level instead of calling allprojects { repositories { ... } }.
@@ -44,7 +46,9 @@ allprojects { Project p ->
         return
     }
 
-    p.apply plugin: "io.gitlab.arturbosch.detekt"
+    // Applied by class -- apply plugin: "io.gitlab.arturbosch.detekt" throws
+    // UnknownPluginException from an initscript-only classpath (see spotless.init.gradle).
+    p.pluginManager.apply(DetektPlugin)
 
     // Compose rule set (nlopez) satisfies the `compose:` block in the shared
     // detekt.yml and adds Compose-specific checks.
