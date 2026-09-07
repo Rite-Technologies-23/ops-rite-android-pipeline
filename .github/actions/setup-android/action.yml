@@ -57,29 +57,28 @@ runs:
   steps:
 
     # ----------------------------------------------------------------------
-    # Resolve which pipeline repo/ref this workflow came from.
+    # Resolve which pipeline repo/ref this action came from.
     #
-    # github.repository is the CALLER inside a reusable workflow, so it cannot
-    # be used here. github.workflow_ref carries the owning repo and ref of the
-    # workflow file itself, which guarantees the init scripts always match the
-    # workflow version being executed -- no drift, and no third-party repo in
-    # the supply chain.
+    # github.repository is the CALLER inside a reusable workflow, and
+    # github.workflow_ref is *also* the caller's workflow ref in that context
+    # (a documented GitHub Actions gotcha -- see actions/toolkit#1264), so
+    # neither identifies this pipeline repo. github.action_repository /
+    # github.action_ref DO reflect the repo/ref this composite action's own
+    # `uses:` line points at, which is exactly what we need -- but they are
+    # only reliable when captured via `env:` on the step, not read directly
+    # inside `run:` (community discussion #69631), hence the env: block below.
     # ----------------------------------------------------------------------
     - name: Resolve pipeline source
       id: resolve
       shell: bash
+      env:
+        ACTION_REPO: ${{ github.action_repository }}
+        ACTION_REF: ${{ github.action_ref }}
       run: |
         set -euo pipefail
 
-        WORKFLOW_REF="${GITHUB_WORKFLOW_REF:-}"
-
-        if [ -n "$WORKFLOW_REF" ]; then
-          PIPELINE_REPO="${WORKFLOW_REF%%/.github/*}"
-          PIPELINE_REF="${WORKFLOW_REF##*@}"
-        else
-          PIPELINE_REPO="Rite-Technologies-23/ops-rite-android-pipeline"
-          PIPELINE_REF="main"
-        fi
+        PIPELINE_REPO="${ACTION_REPO:-Rite-Technologies-23/ops-rite-android-pipeline}"
+        PIPELINE_REF="${ACTION_REF:-main}"
 
         echo "repo=$PIPELINE_REPO" >> "$GITHUB_OUTPUT"
         echo "ref=$PIPELINE_REF"   >> "$GITHUB_OUTPUT"
