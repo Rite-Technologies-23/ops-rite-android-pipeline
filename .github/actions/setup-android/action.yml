@@ -67,6 +67,13 @@ runs:
     # `uses:` line points at, which is exactly what we need -- but they are
     # only reliable when captured via `env:` on the step, not read directly
     # inside `run:` (community discussion #69631), hence the env: block below.
+    #
+    # action_repository/action_ref are empty when this action is invoked via
+    # a local path (uses: ./...) instead of a remote ref -- which happens
+    # when the pipeline repo tests itself. In that case the current checkout
+    # already IS the pipeline repo, so we fall back to the runner's own
+    # GITHUB_REPOSITORY/GITHUB_SHA rather than a hardcoded org/repo, keeping
+    # this action reusable by any repo it's copied or forked into.
     # ----------------------------------------------------------------------
     - name: Resolve pipeline source
       id: resolve
@@ -77,8 +84,8 @@ runs:
       run: |
         set -euo pipefail
 
-        PIPELINE_REPO="${ACTION_REPO:-Rite-Technologies-23/ops-rite-android-pipeline}"
-        PIPELINE_REF="${ACTION_REF:-main}"
+        PIPELINE_REPO="${ACTION_REPO:-$GITHUB_REPOSITORY}"
+        PIPELINE_REF="${ACTION_REF:-$GITHUB_SHA}"
 
         echo "repo=$PIPELINE_REPO" >> "$GITHUB_OUTPUT"
         echo "ref=$PIPELINE_REF"   >> "$GITHUB_OUTPUT"
