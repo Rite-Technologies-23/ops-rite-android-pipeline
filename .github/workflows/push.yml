@@ -118,6 +118,17 @@ on:
         type: boolean
         default: true
 
+      cyclonedx_skip_projects:
+        required: false
+        type: string
+        default: ""
+        description: >-
+          Comma-separated Gradle project names to exclude from the CycloneDX SBOM
+          (cyclonedxBom's own skipProjects). Needed for local Android library
+          modules whose runtime configuration exposes too many variants for the
+          plugin's dependency-walking code to resolve unambiguously -- e.g.
+          "hl7Core". Does not affect the real app build, only SBOM generation.
+
       # ---- static typing strictness ----
       kotlin_warnings_as_errors:
         required: false
@@ -195,6 +206,7 @@ env:
   APP_MODULE: ${{ inputs.app_module }}
   COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
   COVERAGE_BRANCH_THRESHOLD: ${{ inputs.coverage_branch_threshold }}
+  CYCLONEDX_SKIP_PROJECTS: ${{ inputs.cyclonedx_skip_projects }}
 
   # Tool versions, consumed by the Gradle init scripts. Bump them here.
   DETEKT_VERSION: "1.23.7"

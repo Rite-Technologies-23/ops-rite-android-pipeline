@@ -9,11 +9,21 @@
 //
 // DAGP 2.x split into two plugin ids that must each be applied at their own
 // scope (see https://github.com/autonomousapps/dependency-analysis-gradle-plugin/wiki/Adding-to-your-project):
-//   - "com.autonomousapps.build-health"      -> Settings plugin (beforeSettings {})
+//   - "com.autonomousapps.build-health"        -> Settings plugin (beforeSettings {})
 //   - "com.autonomousapps.dependency-analysis" -> Project plugin (root project only)
-// Applying the project-scoped id to Settings (the pre-2.x shape of this
-// script) fails with UnknownPluginException: the id simply isn't registered
-// against the Settings PluginManager.
+//
+// Both marker files ARE bundled in the jar pulled in via initscript{} below
+// (verified: META-INF/gradle-plugins/com.autonomousapps.{build-health,
+// dependency-analysis}.properties both exist in the 2.6.1 jar), but Gradle's
+// Settings-level plugin resolver only looks plugins up by id through the
+// plugins{}/pluginManagement resolution path, not through a plain
+// initscript-injected classpath -- so pluginManager.apply(String) throws
+// UnknownPluginException even with the correct id. Applying by class instead
+// bypasses that lookup entirely (same workaround as CycloneDxPlugin below,
+// in cyclonedx.init.gradle).
+
+import com.autonomousapps.BuildHealthPlugin
+import com.autonomousapps.DependencyAnalysisPlugin
 
 def dagpVersion = System.getenv("DAGP_VERSION") ?: "2.6.1"
 
@@ -36,18 +46,21 @@ beforeSettings { settings ->
             gradlePluginPortal()
         }
     }
-    settings.pluginManager.apply("com.autonomousapps.build-health")
+    settings.pluginManager.apply(BuildHealthPlugin)
 }
 
 gradle.rootProject { Project root ->
-    root.pluginManager.apply("com.autonomousapps.dependency-analysis")
-    root.pluginManager.withPlugin("com.autonomousapps.dependency-analysis") {
-        root.extensions.configure("dependencyAnalysis") { ext ->
-            // Report-only by default; the CI job decides whether to fail.
-            ext.issues { issues ->
-                issues.all { project ->
-                    project.onAny { it.severity((System.getenv("DAGP_SEVERITY") ?: "warn")) }
-                }
+    // Applied unconditionally just above, so configure the extension directly
+    // rather than gating on withPlugin("com.autonomousapps.dependency-analysis")
+    // -- that gate gets its match by looking up the id Gradle associates with
+    // an applied class, which is the exact lookup this file works around
+    // above for Settings and isn't worth relying on here too.
+    root.pluginManager.apply(DependencyAnalysisPlugin)
+    root.extensions.configure("dependencyAnalysis") { ext ->
+        // Report-only by default; the CI job decides whether to fail.
+        ext.issues { issues ->
+            issues.all { project ->
+                project.onAny { it.severity((System.getenv("DAGP_SEVERITY") ?: "warn")) }
             }
         }
     }

@@ -66,5 +66,20 @@ rootProject { Project root ->
                 "releaseRuntimeClasspath",
                 "runtimeClasspath",
         ])
+
+        // Some local Android library modules expose a runtime configuration with
+        // too many variants (aar-metadata, classes-jar, manifest, res, jni, ...)
+        // for cyclonedxBom's own dependency-walking code to pick one from --
+        // ArtifactSelectionException, not a real build problem (the actual app
+        // build resolves these fine; only this task's introspection can't).
+        // skipProjects drops such modules from the SBOM instead of the whole
+        // configuration, so every other dependency is still reported.
+        def skipProjects = (System.getenv("CYCLONEDX_SKIP_PROJECTS") ?: "")
+                .split(",")
+                .collect { it.trim() }
+                .findAll { !it.isEmpty() }
+        if (!skipProjects.isEmpty()) {
+            t.setSkipProjects(skipProjects)
+        }
     }
 }
