@@ -214,7 +214,7 @@ defaults:
     shell: bash
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: android-ci-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
