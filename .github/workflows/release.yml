@@ -115,6 +115,9 @@ jobs:
   ci:
     name: Android CI (Reusable)
     uses: ./.github/workflows/push.yml
+    permissions:
+      contents: read
+      pull-requests: write
     with:
       java_version: ${{ inputs.java_version }}
       build_variant: ${{ inputs.build_variant }}
