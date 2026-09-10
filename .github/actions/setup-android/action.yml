@@ -168,6 +168,9 @@ runs:
         TMP_DIR="$(mktemp -d)"
         curl -sSLo "$TMP_DIR/gradle.zip" \
           "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip"
+        curl -sSLo "$TMP_DIR/gradle.zip.sha256" \
+          "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip.sha256"
+        echo "$(cat "$TMP_DIR/gradle.zip.sha256")  $TMP_DIR/gradle.zip" | sha256sum -c -
         unzip -q "$TMP_DIR/gradle.zip" -d "$TMP_DIR"
 
         "$TMP_DIR/gradle-${GRADLE_VERSION}/bin/gradle" wrapper \

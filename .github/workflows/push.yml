@@ -28,6 +28,14 @@ on:
         required: true
         type: string
 
+      app_module:
+        required: false
+        type: string
+        default: "app"
+        description: >-
+          Gradle module that produces the APK/AAB and JaCoCo report (e.g. "app",
+          "mobile", "feature-app"). Defaults to "app" for backward compatibility.
+
       coverage_threshold:
         required: true
         type: string
@@ -184,6 +192,7 @@ on:
 env:
   JAVA_VERSION: ${{ inputs.java_version }}
   BUILD_VARIANT: ${{ inputs.build_variant }}
+  APP_MODULE: ${{ inputs.app_module }}
   COVERAGE_THRESHOLD: ${{ inputs.coverage_threshold }}
   COVERAGE_BRANCH_THRESHOLD: ${{ inputs.coverage_branch_threshold }}
 
@@ -195,7 +204,10 @@ env:
   DAGP_VERSION: "2.6.1"
   CYCLONEDX_VERSION: "1.10.0"
   GITLEAKS_VERSION: "8.21.2"
-  TRIVY_VERSION: "0.58.1"
+  # 0.58.1 (the previous pin) no longer has downloadable release assets on
+  # GitHub -- verified 404 on trivy_0.58.1_Linux-64bit.tar.gz as of 2026-09-10.
+  TRIVY_VERSION: "0.74.0"
+  SEMGREP_VERSION: "1.165.0"
 
 defaults:
   run:
@@ -205,9 +217,24 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-ci-${{ github.workflow }}-${{ github.ref }}
+  group: android-ci-${{ github.repository }}-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# -----------------------------------------------------------------------------
+# Every `setup-android` call below is pinned to "@main", not a tag/SHA of THIS
+# repo. That's not an oversight: GitHub Actions does not allow the ref portion
+# of a `uses:` line to be templated with an expression, so there is no way for
+# this file to reference "whatever ref of push.yml the caller pinned" -- see
+# the resolution logic (and its rationale) in
+# .github/actions/setup-android/action.yml. Practical consequence: even a
+# caller that pins `push.yml@vX.Y.Z` gets tool configs/init-scripts from
+# main at run time, not from vX.Y.Z.
+#
+# If/when this repo starts cutting release tags for callers to pin against,
+# every "@main" below (and the summary job's checkout `ref: main`) must be
+# updated to "@vX.Y.Z" as part of that release, so a pinned caller actually
+# gets a pinned, reproducible pipeline.
+# -----------------------------------------------------------------------------
 jobs:
 
   # =========================================================================
@@ -394,6 +421,14 @@ jobs:
           set -euo pipefail
           curl -sSLo /tmp/gitleaks.tar.gz \
             "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSLo /tmp/gitleaks_checksums.txt \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          EXPECTED=$(grep "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz\$" /tmp/gitleaks_checksums.txt | awk '{print $1}')
+          ACTUAL=$(sha256sum /tmp/gitleaks.tar.gz | awk '{print $1}')
+          if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::gitleaks checksum mismatch (expected $EXPECTED, got $ACTUAL)"
+            exit 1
+          fi
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
@@ -423,7 +458,7 @@ jobs:
 
       - name: Install Semgrep
         if: ${{ inputs.run_security }}
-        run: python -m pip install --quiet --disable-pip-version-check semgrep
+        run: python -m pip install --quiet --disable-pip-version-check "semgrep==${SEMGREP_VERSION}"
 
       - name: Run Semgrep (SAST)
         if: ${{ inputs.run_security }}
@@ -484,6 +519,14 @@ jobs:
           set -euo pipefail
           curl -sSLo /tmp/trivy.tar.gz \
             "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -sSLo /tmp/trivy_checksums.txt \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_checksums.txt"
+          EXPECTED=$(grep "trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz\$" /tmp/trivy_checksums.txt | awk '{print $1}')
+          ACTUAL=$(sha256sum /tmp/trivy.tar.gz | awk '{print $1}')
+          if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error::trivy checksum mismatch (expected $EXPECTED, got $ACTUAL)"
+            exit 1
+          fi
           tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
           sudo install -m 0755 /tmp/trivy /usr/local/bin/trivy
           trivy --version
@@ -497,8 +540,18 @@ jobs:
           SBOM="build/reports/sbom/bom.json"
 
           if [ ! -f "$SBOM" ]; then
-            echo "::warning::SBOM not generated -- falling back to filesystem scan."
+            echo "::warning::SBOM not generated -- falling back to filesystem scan. The vulnerability gate below still applies."
+
+            trivy fs . --scanners vuln --format json --output trivy.json \
+              --severity LOW,MEDIUM,HIGH,CRITICAL --exit-code 0
             trivy fs . --scanners vuln --format table --severity HIGH,CRITICAL --exit-code 0
+
+            COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH" or .Severity=="CRITICAL")] | length' trivy.json)
+            echo "Trivy (filesystem scan): ${COUNT} HIGH/CRITICAL vulnerabilities"
+
+            if [ "$COUNT" -gt 0 ]; then
+              exit 1
+            fi
             exit 0
           fi
 
@@ -605,6 +658,12 @@ jobs:
     runs-on: ${{ inputs.runner }}
     if: ${{ inputs.run_tests }}
 
+    # pull-requests: write is needed only by the "Comment coverage on PR" step
+    # below (madrapps/jacoco-report posts/updates a PR comment via github.token).
+    permissions:
+      contents: read
+      pull-requests: write
+
     outputs:
       coverage_percent: ${{ steps.coverage.outputs.coverage_percent }}
       branch_coverage_percent: ${{ steps.coverage.outputs.branch_coverage_percent }}
@@ -642,15 +701,15 @@ jobs:
           INIT_SCRIPT=".pipeline/gradle/jacoco.init.gradle"
           STRICT=".pipeline/gradle/kotlin-strict.init.gradle"
 
-          if ./gradlew -I "$INIT_SCRIPT" :app:tasks --all --no-daemon | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
+          if ./gradlew -I "$INIT_SCRIPT" ":${APP_MODULE}:tasks" --all --no-daemon | grep -qE '(^|[[:space:]])jacocoTestReport\b'; then
             ./gradlew -I "$INIT_SCRIPT" -I "$STRICT" \
               clean \
-              ":app:test${BUILD_VARIANT}UnitTest" \
-              :app:jacocoTestReport \
+              ":${APP_MODULE}:test${BUILD_VARIANT}UnitTest" \
+              ":${APP_MODULE}:jacocoTestReport" \
               "-PcoverageVariant=${BUILD_VARIANT}" \
               --rerun-tasks --no-build-cache --no-daemon
           else
-            echo "::error::':app:jacocoTestReport' not found."
+            echo "::error::':${APP_MODULE}:jacocoTestReport' not found. Set app_module if your APK module isn't named 'app'."
             exit 1
           fi
 
@@ -660,7 +719,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          XML="app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
+          XML="${APP_MODULE}/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml"
 
           if [ ! -f "$XML" ]; then
             echo "::error::JaCoCo XML not found at $XML"
@@ -668,12 +727,14 @@ jobs:
           fi
 
           # The report-level counters are the LAST ones in the document, after
-          # every package element.
+          # every package element. Uses portable POSIX ERE (grep -oE), not -oP,
+          # so this also works on runners without GNU grep (e.g. macOS/BSD).
           read_counter () {
             local type="$1" attr="$2"
-            grep -oP "<counter type=\"${type}\" missed=\"[0-9]+\" covered=\"[0-9]+\"\\s*/>" "$XML" \
+            grep -oE "<counter type=\"${type}\" missed=\"[0-9]+\" covered=\"[0-9]+\"[[:space:]]*/>" "$XML" \
               | tail -1 \
-              | grep -oP "${attr}=\"\\K[0-9]+" || echo ""
+              | grep -oE "${attr}=\"[0-9]+\"" \
+              | grep -oE "[0-9]+" || echo ""
           }
 
           pct () {
@@ -738,7 +799,7 @@ jobs:
         continue-on-error: true
         uses: madrapps/jacoco-report@v1.7.1
         with:
-          paths: app/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml
+          paths: ${{ inputs.app_module }}/build/reports/jacoco/jacocoTestReport/jacocoTestReport.xml
           token: ${{ github.token }}
           min-coverage-overall: ${{ inputs.coverage_threshold }}
           min-coverage-changed-files: ${{ inputs.coverage_threshold }}
@@ -751,8 +812,8 @@ jobs:
         with:
           name: test-reports-${{ inputs.build_variant }}
           path: |
-            app/build/reports/tests/
-            app/build/test-results/
+            ${{ inputs.app_module }}/build/reports/tests/
+            ${{ inputs.app_module }}/build/test-results/
             junit-summary.txt
           if-no-files-found: ignore
           retention-days: 14
@@ -762,7 +823,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: jacoco-reports-${{ inputs.build_variant }}
-          path: app/build/reports/jacoco/
+          path: ${{ inputs.app_module }}/build/reports/jacoco/
           if-no-files-found: ignore
           retention-days: 14
 
@@ -811,8 +872,8 @@ jobs:
         with:
           name: android-build-outputs-${{ inputs.build_variant }}
           path: |
-            app/build/outputs/apk/
-            app/build/outputs/bundle/
+            ${{ inputs.app_module }}/build/outputs/apk/
+            ${{ inputs.app_module }}/build/outputs/bundle/
           if-no-files-found: warn
           retention-days: 14
 
@@ -827,10 +888,15 @@ jobs:
 
     steps:
 
+      # ref is pinned explicitly (not left to default-branch resolution) so this
+      # matches what the other jobs' setup-android@main calls resolve to. See
+      # the "@main" note above the `jobs:` key for why this can't be made to
+      # track a caller-pinned tag of this workflow.
       - name: Checkout pipeline scripts
         uses: actions/checkout@v4
         with:
           repository: Rite-Technologies-23/ops-rite-android-pipeline
+          ref: main
           path: .pipeline
           token: ${{ secrets.PIPELINE_TOKEN || github.token }}
           persist-credentials: false

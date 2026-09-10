@@ -69,6 +69,12 @@ on:
         type: string
         default: ""
 
+      android_build_tools_version:
+        required: false
+        type: string
+        default: "34.0.0"
+        description: "Build-tools version used by sdkmanager/zipalign/apksigner when signing."
+
     secrets:
       ANDROID_KEYSTORE:
         required: false
@@ -94,10 +100,10 @@ on:
         value: ${{ jobs.ci.outputs.coverage_percent }}
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: android-cd-${{ github.ref }}
+  group: android-cd-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
 defaults:
@@ -120,6 +126,9 @@ jobs:
     name: Create GitHub Release
     needs: ci
     runs-on: ${{ inputs.runner }}
+
+    permissions:
+      contents: write
 
     outputs:
       version: ${{ steps.version_check.outputs.version }}
@@ -158,17 +167,20 @@ jobs:
             CURRENT_VERSION="$major.$minor.$patch"
           done
 
+          if [ "$CURRENT_VERSION" != "$BASE_VERSION" ]; then
+            echo "::warning::Requested version $BASE_VERSION already has a tag; releasing as $CURRENT_VERSION instead. The APK/AAB built by the ci job still carry whatever versionCode/versionName the app's own build.gradle produced -- they are NOT aware of this bump, so the GitHub Release tag and the version baked into the binary may not match."
+          fi
+
           echo "version=$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ steps.version_check.outputs.tag }}
           name: Release ${{ steps.version_check.outputs.tag }}
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   sign_android:
     name: Sign Android
@@ -185,20 +197,31 @@ jobs:
           path: release/android/unsigned
 
       - name: Install Android SDK tools
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
 
       - name: Install Build Tools
+        env:
+          BUILD_TOOLS_VERSION: ${{ inputs.android_build_tools_version }}
         run: |
-          sdkmanager "build-tools;34.0.0" "platform-tools"
-          echo "$ANDROID_SDK_ROOT/build-tools/34.0.0" >> $GITHUB_PATH
+          set -euo pipefail
+          sdkmanager "build-tools;${BUILD_TOOLS_VERSION}" "platform-tools"
+          echo "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}" >> "$GITHUB_PATH"
 
       - name: Decode Keystore
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
         run: |
+          set -euo pipefail
           mkdir -p /tmp/android
-          printf "%s" "${{ secrets.ANDROID_KEYSTORE }}" | base64 --decode > /tmp/android/upload-keystore.jks
+          printf "%s" "$ANDROID_KEYSTORE" | base64 --decode > /tmp/android/upload-keystore.jks
 
       - name: Sign APK
+        env:
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
+          set -euo pipefail
           mkdir -p release/android/signed
 
           APKS=$(find release/android/unsigned -name "*.apk" || true)
@@ -211,15 +234,20 @@ jobs:
 
             apksigner sign \
               --ks /tmp/android/upload-keystore.jks \
-              --ks-key-alias "${{ secrets.KEY_ALIAS }}" \
-              --ks-pass pass:"${{ secrets.KEYSTORE_PASSWORD }}" \
-              --key-pass pass:"${{ secrets.KEY_PASSWORD }}" \
+              --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass "pass:$KEYSTORE_PASSWORD" \
+              --key-pass "pass:$KEY_PASSWORD" \
               --out "$OUT" \
               /tmp/aligned.apk
           done
 
       - name: Sign AAB
+        env:
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
+          set -euo pipefail
           AABS=$(find release/android/unsigned -name "*.aab" || true)
 
           for AAB in $AABS; do
@@ -230,10 +258,10 @@ jobs:
 
             jarsigner \
               -keystore /tmp/android/upload-keystore.jks \
-              -storepass "${{ secrets.KEYSTORE_PASSWORD }}" \
-              -keypass "${{ secrets.KEY_PASSWORD }}" \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
               "$OUT" \
-              "${{ secrets.KEY_ALIAS }}"
+              "$KEY_ALIAS"
           done
 
       - name: Upload signed artifacts
@@ -272,7 +300,7 @@ jobs:
           fi
 
       - name: Upload to Play Store
-        uses: r0adkll/upload-google-play@v1
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
           packageName: ${{ inputs.package_name }}
@@ -285,7 +313,7 @@ jobs:
   deploy_esper:
     name: Deploy to Esper
     if: ${{ inputs.deploy_to_esper }}
-    needs: sign_android
+    needs: [sign_android, create_release]
     runs-on: ${{ inputs.runner }}
 
     steps:
@@ -314,6 +342,9 @@ jobs:
     if: ${{ inputs.deploy_to_playstore || inputs.deploy_to_esper }}
     needs: [create_release, sign_android]
     runs-on: ${{ inputs.runner }}
+
+    permissions:
+      contents: write
 
     steps:
 

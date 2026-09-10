@@ -1,6 +1,19 @@
 ###############################################################
 # 🧩 Terraform: GitHub Actions Secrets Setup
-# This is an example for provisioning repository secrets.
+# This is an EXAMPLE for provisioning repository secrets -- it is not wired
+# into any workflow in this repo.
+#
+# github_actions_secret.plaintext_value means the secret VALUES are written
+# into the Terraform state file (GitHub only stores them encrypted on its
+# side; Terraform's own record of what it applied is not encrypted by
+# default). Before applying this for real:
+#   - Configure a `backend` with encryption at rest (e.g. an S3 backend with
+#     SSE, or Terraform Cloud/Enterprise) -- do NOT use local state for this.
+#   - Never commit terraform.tfstate to source control.
+#   - Scope github_token to the minimum needed to manage Action secrets on
+#     ONE repo, not full `repo` + `admin:repo_hook` -- a fine-grained PAT
+#     limited to "Secrets" (read/write) on the target repository is enough.
+#
 # Requires: terraform-provider-github
 ###############################################################
 
@@ -20,7 +33,7 @@ provider "github" {
 }
 
 variable "github_token" {
-  description = "GitHub personal access token with repo and admin:repo_hook scopes"
+  description = "GitHub PAT scoped to Actions secrets (read/write) on repo_name only -- not a broad 'repo' + 'admin:repo_hook' token"
   type        = string
   sensitive   = true
 }

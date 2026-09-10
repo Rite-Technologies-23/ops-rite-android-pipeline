@@ -14,6 +14,10 @@ echo "Installing Android SDK and required components..."
 
 ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$HOME/android-sdk}"
 CMDLINE_TOOLS_ZIP="commandlinetools-linux-11076708_latest.zip"
+# sha1 published by Google for the exact build above, from
+# https://dl.google.com/android/repository/repository2-3.xml -- update this
+# together with CMDLINE_TOOLS_ZIP whenever the build number is bumped.
+CMDLINE_TOOLS_SHA1="d313adb7aedccf6cf0cfca51ec180f0059f5f8f8"
 
 mkdir -p "$ANDROID_SDK_ROOT"
 echo "SDK directory: $ANDROID_SDK_ROOT"
@@ -28,6 +32,7 @@ if [ ! -d "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" ]; then
     mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
     cd "$ANDROID_SDK_ROOT/cmdline-tools"
     curl -sSL "https://dl.google.com/android/repository/${CMDLINE_TOOLS_ZIP}" -o cmdline-tools.zip
+    echo "${CMDLINE_TOOLS_SHA1}  cmdline-tools.zip" | sha1sum -c -
     unzip -q cmdline-tools.zip
     rm -rf latest
     mv cmdline-tools latest

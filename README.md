@@ -65,6 +65,12 @@ gradle/
 └── kotlin-strict.init.gradle     # Compiler strictness
 ```
 
+`.github/infra/` (Dockerfile + Terraform) is **not wired into either workflow**. It's example
+scaffolding only — a reference build image and a reference secrets-provisioning template —
+kept for teams that want a starting point, not something the CI/CD pipeline itself runs.
+
+
+
 ---
 
 # 🧠 Architecture Overview
@@ -145,6 +151,7 @@ Upload signed artifacts to GitHub Release
 
 | Input | Default | Description |
 |------|---------|-------------|
+| `app_module` | `"app"` | Gradle module that produces the APK/AAB and JaCoCo report |
 | `coverage_branch_threshold` | `"0"` | Minimum BRANCH coverage %. `0` disables the branch gate |
 | `formatting_ratchet_from` | `""` | Git ref — only check files changed since it |
 | `lint_check_all_warnings` | `false` | Enable lint checks that are off by default |
@@ -262,6 +269,7 @@ Handles:
 | `esper_app_id` | Esper application ID |
 | `enable_whats_new` | Enable release notes |
 | `whats_new_file` | File containing release notes |
+| `android_build_tools_version` | Build-tools version used when signing (default `"34.0.0"`) |
 
 ---
 
@@ -331,6 +339,14 @@ The same release notes are used for:
 ## Esper Deployment
 
 - `ESPER_API_KEY`
+
+---
+
+## Pipeline checkout (optional)
+
+- `PIPELINE_TOKEN` — forwarded to the nested CI run; same as the CI workflow's own
+  `PIPELINE_TOKEN` (only needed when this pipeline repo is private and the caller
+  lives elsewhere).
 
 ---
 
