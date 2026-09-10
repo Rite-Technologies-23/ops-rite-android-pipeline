@@ -34,6 +34,19 @@ import org.cyclonedx.gradle.CycloneDxPlugin
 
 rootProject { Project root ->
 
+    // cyclonedxBom refuses to run unless group/name/version are explicitly
+    // set on the root project. Most Android apps never set these -- they
+    // don't publish artifacts -- so root.group/root.version sit at Gradle's
+    // defaults ("" / "unspecified"). Rather than requiring every caller repo
+    // to add them to its own build.gradle.kts, fill in CI-derived fallbacks
+    // here, but only when the caller hasn't already set real values.
+    if (root.version == Project.DEFAULT_VERSION) {
+        root.version = System.getenv("GITHUB_SHA") ?: "0.0.0"
+    }
+    if (root.group.toString().isEmpty()) {
+        root.group = System.getenv("GITHUB_REPOSITORY") ?: root.name
+    }
+
     // Applied by class -- apply plugin: "org.cyclonedx.bom" throws
     // UnknownPluginException from an initscript-only classpath (see spotless.init.gradle).
     root.pluginManager.apply(CycloneDxPlugin)

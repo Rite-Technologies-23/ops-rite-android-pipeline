@@ -7,7 +7,13 @@
 //
 //   ./gradlew buildHealth   -> build/reports/dependency-analysis/build-health-report.txt
 //
-// It is a SETTINGS plugin, so it must be applied in beforeSettings {}.
+// DAGP 2.x split into two plugin ids that must each be applied at their own
+// scope (see https://github.com/autonomousapps/dependency-analysis-gradle-plugin/wiki/Adding-to-your-project):
+//   - "com.autonomousapps.build-health"      -> Settings plugin (beforeSettings {})
+//   - "com.autonomousapps.dependency-analysis" -> Project plugin (root project only)
+// Applying the project-scoped id to Settings (the pre-2.x shape of this
+// script) fails with UnknownPluginException: the id simply isn't registered
+// against the Settings PluginManager.
 
 def dagpVersion = System.getenv("DAGP_VERSION") ?: "2.6.1"
 
@@ -30,10 +36,11 @@ beforeSettings { settings ->
             gradlePluginPortal()
         }
     }
-    settings.pluginManager.apply("com.autonomousapps.dependency-analysis")
+    settings.pluginManager.apply("com.autonomousapps.build-health")
 }
 
 gradle.rootProject { Project root ->
+    root.pluginManager.apply("com.autonomousapps.dependency-analysis")
     root.pluginManager.withPlugin("com.autonomousapps.dependency-analysis") {
         root.extensions.configure("dependencyAnalysis") { ext ->
             // Report-only by default; the CI job decides whether to fail.
