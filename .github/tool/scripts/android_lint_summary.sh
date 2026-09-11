@@ -36,8 +36,8 @@ for f in "${FILES[@]}"; do
   ERRORS=$((ERRORS     + $(grep -c 'severity="Error"'       "$f" 2>/dev/null || true) ))
   WARNINGS=$((WARNINGS + $(grep -c 'severity="Warning"'     "$f" 2>/dev/null || true) ))
   FATALS=$((FATALS     + $(grep -c 'severity="Fatal"'       "$f" 2>/dev/null || true) ))
-  SECURITY=$((SECURITY + $(grep -oE "id=\"(${SECURITY_IDS})\"" "$f" 2>/dev/null | wc -l) ))
-  DEADCODE=$((DEADCODE + $(grep -oE "id=\"(${DEADCODE_IDS})\"" "$f" 2>/dev/null | wc -l) ))
+  SECURITY=$((SECURITY + $(grep -oE "id=\"(${SECURITY_IDS})\"" "$f" 2>/dev/null | wc -l || true) ))
+  DEADCODE=$((DEADCODE + $(grep -oE "id=\"(${DEADCODE_IDS})\"" "$f" 2>/dev/null | wc -l || true) ))
 done
 
 ERRORS=$((ERRORS + FATALS))
