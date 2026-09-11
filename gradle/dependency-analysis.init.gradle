@@ -7,19 +7,24 @@
 //
 //   ./gradlew buildHealth   -> build/reports/dependency-analysis/build-health-report.txt
 //
-// Pinned to the last 1.x release (see DAGP_VERSION in push.yml), not 2.x.
-// DAGP 2.x replaced this single project plugin with a Settings plugin
-// ("com.autonomousapps.build-health") that, once applied, auto-applies
-// "com.autonomousapps.dependency-analysis" to every subproject BY STRING ID
-// internally (BuildHealthPlugin.kt). That internal apply-by-id can't resolve
-// a plugin injected via this file's initscript{} classpath -- only
-// apply-by-class works from that classpath (see CycloneDxPlugin below in
-// cyclonedx.init.gradle for the same limitation) -- and the failing call is
-// inside DAGP's own bytecode, so no init-script workaround fixes it.
+// Pinned to the last 1.x release (see DAGP_VERSION in push.yml), not 2.x --
+// 2.x's Settings plugin has no equivalent to the autoapply escape hatch below
+// (BuildHealthPlugin.kt's subproject loop is unconditional), so 1.x is the
+// only version this workaround is confirmed against.
 //
-// 1.x has no such split: a single plugin, applied once to the root project,
-// analyzes every subproject on its own (confirmed via the plugin's own
-// dependencyAnalysis extension, which is unchanged in shape between 1.x/2.x).
+// Both DAGP major versions auto-apply themselves to every subproject
+// internally, by calling `subproject.apply(plugin = "com.autonomousapps.
+// dependency-analysis")` -- BY STRING ID. That can never resolve from a
+// plugin injected via this file's initscript{} classpath: only apply-by-class
+// works from that classpath (see CycloneDxPlugin in cyclonedx.init.gradle for
+// the same limitation), and the failing call is inside DAGP's own bytecode,
+// so no init-script trick fixes THAT call directly.
+//
+// Instead: the "buildHealth" task invocation passes
+// -Pdependency.analysis.autoapply=false, which (per RootPlugin.kt's
+// `conditionallyApplyToSubprojects`) makes DAGP skip its internal subproject
+// loop entirely -- and we do the equivalent apply ourselves below, by class,
+// to every subproject.
 
 import com.autonomousapps.DependencyAnalysisPlugin
 
@@ -48,6 +53,11 @@ gradle.rootProject { Project root ->
     // Applied by class -- see the note above and cyclonedx.init.gradle's
     // CycloneDxPlugin for why apply(String) doesn't work from this classpath.
     root.pluginManager.apply(DependencyAnalysisPlugin)
+
+    // Stands in for DAGP's own (disabled, see above) subproject auto-apply,
+    // so every module still gets analyzed, not just the root project.
+    root.subprojects { sub -> sub.pluginManager.apply(DependencyAnalysisPlugin) }
+
     root.extensions.configure("dependencyAnalysis") { ext ->
         // Report-only by default; the CI job decides whether to fail.
         ext.issues { issues ->

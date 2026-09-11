@@ -653,7 +653,13 @@ jobs:
           DAGP_SEVERITY: ${{ inputs.fail_on_dead_code && 'fail' || 'warn' }}
         run: |
           set -euo pipefail
+          # -Pdependency.analysis.autoapply=false stops DAGP's own RootPlugin
+          # from auto-applying itself to every subproject BY STRING ID
+          # internally -- that always fails from an initscript-injected
+          # classpath (see dependency-analysis.init.gradle). The init script
+          # applies it to every subproject itself instead, by class.
           ./gradlew -I .pipeline/gradle/dependency-analysis.init.gradle \
+            -Pdependency.analysis.autoapply=false \
             buildHealth --no-daemon --stacktrace
 
           REPORT="build/reports/dependency-analysis/build-health-report.txt"
