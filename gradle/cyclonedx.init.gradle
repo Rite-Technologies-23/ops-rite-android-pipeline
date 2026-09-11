@@ -31,6 +31,7 @@ beforeSettings { settings ->
 }
 
 import org.cyclonedx.gradle.CycloneDxPlugin
+import org.gradle.api.artifacts.ProjectDependency
 
 rootProject { Project root ->
 
@@ -54,32 +55,72 @@ rootProject { Project root ->
     def variant = (System.getenv("BUILD_VARIANT") ?: "Debug")
     def variantLower = variant.substring(0, 1).toLowerCase() + variant.substring(1)
 
+    // Runtime graph of the variant under build -- that is what actually ships.
+    def realConfigNames = [
+            "${variantLower}RuntimeClasspath".toString(),
+            "releaseRuntimeClasspath",
+            "runtimeClasspath",
+    ]
+
+    def skipProjects = (System.getenv("CYCLONEDX_SKIP_PROJECTS") ?: "")
+            .split(",")
+            .collect { it.trim() }
+            .findAll { !it.isEmpty() }
+
     root.tasks.named("cyclonedxBom").configure { t ->
         t.setOutputName("bom")
         t.setOutputFormat("all")
         t.setDestination(root.file("build/reports/sbom"))
         t.setIncludeBomSerialNumber(false)
         t.setSkipConfigs(["lintClassPath", "kapt*", "ksp*", "detekt*", "spotless*"])
-        // Runtime graph of the variant under build -- that is what actually ships.
-        t.setIncludeConfigs([
-                "${variantLower}RuntimeClasspath".toString(),
-                "releaseRuntimeClasspath",
-                "runtimeClasspath",
-        ])
 
         // Some local Android library modules expose a runtime configuration with
         // too many variants (aar-metadata, classes-jar, manifest, res, jni, ...)
         // for cyclonedxBom's own dependency-walking code to pick one from --
         // ArtifactSelectionException, not a real build problem (the actual app
         // build resolves these fine; only this task's introspection can't).
-        // skipProjects drops such modules from the SBOM instead of the whole
-        // configuration, so every other dependency is still reported.
-        def skipProjects = (System.getenv("CYCLONEDX_SKIP_PROJECTS") ?: "")
-                .split(",")
-                .collect { it.trim() }
-                .findAll { !it.isEmpty() }
+        //
+        // skipProjects alone only stops such a module from being scanned as ITS
+        // OWN target -- it does NOT stop the module from crashing resolution
+        // when it shows up as a dependency INSIDE another project's runtime
+        // configuration (e.g. :app's), which is what actually throws. Forcing a
+        // fix via the caller's own build.gradle.kts (targetConfiguration =
+        // "default") is NOT safe in general: it bypasses AGP's normal
+        // variant-aware resolution for that dependency, which silently drops
+        // the module's compiled Kotlin/Java API from the real compile
+        // classpath if anything actually imports from it.
+        //
+        // So instead: for every subproject with one of the real runtime
+        // configs, clone it (copyRecursive -- preserves attributes and
+        // resolution strategy, so it resolves identically) and strip out only
+        // the skip-listed projects' dependency entries from the CLONE. The
+        // clone is scanned in place of the original; the original (and the
+        // real build, which never references the clone) is untouched.
+        def scanConfigNames = realConfigNames
         if (!skipProjects.isEmpty()) {
             t.setSkipProjects(skipProjects)
+
+            def cloneNames = []
+            root.subprojects.each { sub ->
+                realConfigNames.each { realName ->
+                    def real = sub.configurations.findByName(realName)
+                    if (real != null && real.canBeResolved) {
+                        def clone = real.copyRecursive()
+                        clone.dependencies.removeIf { dep ->
+                            dep instanceof ProjectDependency &&
+                                    skipProjects.contains(dep.dependencyProject.name)
+                        }
+                        sub.configurations.add(clone)
+                        cloneNames << clone.name
+                    }
+                }
+            }
+            if (!cloneNames.isEmpty()) {
+                // Whitelist only the clones -- the real configs (still present
+                // on every project) are implicitly excluded by not being listed.
+                scanConfigNames = cloneNames
+            }
         }
+        t.setIncludeConfigs(scanConfigNames)
     }
 }
