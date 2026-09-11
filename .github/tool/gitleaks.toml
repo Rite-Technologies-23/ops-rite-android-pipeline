@@ -15,6 +15,12 @@ paths = [
   '''gradle/wrapper/gradle-wrapper\.properties''',
   '''.*\.(png|jpg|jpeg|webp|gif|svg|ttf|otf|so|jar|aar|apk|aab)$''',
   '''.*/src/test/resources/.*''',
+  # google-services.json's "current_key" is the app's Firebase/Android API key.
+  # Google documents this as ship-with-the-app, not a secret: it's meant to be
+  # scoped via API-key restrictions (package name + SHA-1, allowed APIs) in the
+  # GCP console rather than kept confidential. Only allowlist this once those
+  # restrictions are confirmed configured for the project's key(s).
+  '''.*/google-services\.json$''',
 ]
 
 regexes = [
