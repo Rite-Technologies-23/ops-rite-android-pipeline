@@ -39,11 +39,29 @@
 // it'd be fragile across AGP/Gradle version bumps. There is no injection-only
 // fix for this one.
 //
-// So: Android subprojects are skipped here and must declare DAGP themselves
-// (sharing AGP's own classloader) to get dead-code coverage -- see the
-// pipeline README's "Dead code on Android modules" section for the one-time,
-// version-pinned snippet. Everything else about adopting this pipeline stays
-// zero-touch; this is the one tool with a real, unavoidable per-caller cost.
+// Critically, DAGP is WHOLE-BUILD coordinated, not per-module: root and every
+// analyzed subproject share a single root-registered build service
+// (GlobalDslService) that all copies must agree on. That means it is NOT
+// possible to mix "root + some subprojects injected via this init script"
+// with "an Android module declares its own copy directly" in the same build
+// -- the two are different classloaders, so the shared service ends up
+// registered by one copy and read by the other, which throws a
+// ClassCastException (GlobalDslService$Inject cannot be cast to
+// GlobalDslService) the first time a directly-declared module tries to
+// coordinate with an injected root, and DAGP separately refuses to apply to
+// a non-root project at all if the root project doesn't have a *matching*
+// application of its own ("You must apply the plugin to the root project").
+//
+// So the real rule is all-or-nothing per repo: either every module stays on
+// injection (Android modules simply excluded, as above), or -- once ANY
+// module needs to declare DAGP directly -- the root project AND every module
+// that wants coverage must all declare it directly too, and this init script
+// must back off entirely rather than also touching the root project. See the
+// pipeline README's "Dead code on Android modules" section for the exact,
+// version-pinned snippet a caller in that situation needs for its root
+// build file and each covered module. Everything else about adopting this
+// pipeline stays zero-touch; this is the one tool with a real, unavoidable
+// per-caller cost once any Android module is involved.
 
 import com.autonomousapps.DependencyAnalysisPlugin
 
@@ -76,50 +94,69 @@ def ANDROID_PLUGIN_IDS = [
 ]
 
 gradle.rootProject { Project root ->
-    // Root is safe to apply eagerly: AGP is conventionally declared
-    // `apply false` at the root (real application happens per-subproject), so
-    // the root project itself never triggers DAGP's AGP integration code.
-    // Applied by class -- see the note above and cyclonedx.init.gradle's
-    // CycloneDxPlugin for why apply(String) doesn't work from this classpath.
-    root.pluginManager.apply(DependencyAnalysisPlugin)
+    // Deferred to afterEvaluate: the root project's own plugins {} block --
+    // where a caller opting into direct declaration (see above) would apply
+    // DAGP for real -- runs during root's own script evaluation, which
+    // hasn't happened yet at this rootProject-hook point. We need to see the
+    // result of that block before deciding whether to inject at all.
+    root.afterEvaluate {
+        if (root.pluginManager.hasPlugin(DAGP_PLUGIN_ID)) {
+            // The caller already owns DAGP at the root (required once any
+            // Android module needs direct declaration -- see above). Back
+            // off entirely: injecting into root or any subproject here would
+            // create a second, classloader-incompatible instance. Every
+            // module that wants coverage must declare DAGP directly too.
+            root.logger.lifecycle(
+                "[dependency-analysis] Root project already declares DAGP directly " +
+                "-- skipping injection for this build entirely (root and every " +
+                "analyzed module must share one classloader; see the pipeline " +
+                "README's 'Dead code on Android modules' section). Any module that " +
+                "wants coverage and isn't declaring DAGP itself will be missing " +
+                "from the report."
+            )
+        } else {
+            // Applied by class -- see the note above and cyclonedx.init.gradle's
+            // CycloneDxPlugin for why apply(String) doesn't work from this
+            // classpath.
+            root.pluginManager.apply(DependencyAnalysisPlugin)
 
-    // Stands in for DAGP's own (disabled, see above) subproject auto-apply,
-    // so every eligible module still gets analyzed, not just the root project.
-    root.subprojects { Project sub ->
-        // Deferred to afterEvaluate: a subproject's own plugins {} block --
-        // where it would apply com.android.application, or its own directly
-        // declared copy of DAGP -- runs during that subproject's script
-        // evaluation, which hasn't happened yet at this rootProject-hook
-        // point. We need to see the result of that block before deciding.
-        sub.afterEvaluate {
-            if (sub.pluginManager.hasPlugin(DAGP_PLUGIN_ID)) {
-                // Caller already declared DAGP directly on this module (as
-                // Android modules must). Applying our injected copy on top
-                // would load a second, classloader-incompatible instance --
-                // skip, theirs already covers it.
-                return
+            // Stands in for DAGP's own (disabled, see above) subproject
+            // auto-apply, so every eligible module still gets analyzed, not
+            // just the root project.
+            root.subprojects { Project sub ->
+                // Same afterEvaluate deferral as root, one level down: a
+                // subproject's own plugins {} block hasn't run yet either.
+                sub.afterEvaluate {
+                    if (sub.pluginManager.hasPlugin(DAGP_PLUGIN_ID)) {
+                        // Shouldn't normally happen since root would have
+                        // taken the direct-ownership branch above, but skip
+                        // defensively rather than double-apply.
+                        return
+                    }
+                    def isAndroidModule = ANDROID_PLUGIN_IDS.any { sub.pluginManager.hasPlugin(it) }
+                    if (isAndroidModule) {
+                        sub.logger.lifecycle(
+                            "[dependency-analysis] Skipping ${sub.path}: applies an " +
+                            "Android plugin, and DAGP can't be injected into Android " +
+                            "modules via initscript (classloader isolation from AGP). " +
+                            "Declare DAGP directly for the whole build (root + every " +
+                            "covered module) to include it in dead-code analysis -- " +
+                            "see the pipeline README's 'Dead code on Android modules' " +
+                            "section."
+                        )
+                        return
+                    }
+                    sub.pluginManager.apply(DependencyAnalysisPlugin)
+                }
             }
-            def isAndroidModule = ANDROID_PLUGIN_IDS.any { sub.pluginManager.hasPlugin(it) }
-            if (isAndroidModule) {
-                sub.logger.lifecycle(
-                    "[dependency-analysis] Skipping ${sub.path}: applies an Android " +
-                    "plugin, and DAGP can't be injected into Android modules via " +
-                    "initscript (classloader isolation from AGP). Declare DAGP " +
-                    "directly in this module to include it in dead-code analysis " +
-                    "-- see the pipeline README's 'Dead code on Android modules' " +
-                    "section."
-                )
-                return
-            }
-            sub.pluginManager.apply(DependencyAnalysisPlugin)
         }
-    }
 
-    root.extensions.configure("dependencyAnalysis") { ext ->
-        // Report-only by default; the CI job decides whether to fail.
-        ext.issues { issues ->
-            issues.all { project ->
-                project.onAny { it.severity((System.getenv("DAGP_SEVERITY") ?: "warn")) }
+        root.extensions.configure("dependencyAnalysis") { ext ->
+            // Report-only by default; the CI job decides whether to fail.
+            ext.issues { issues ->
+                issues.all { project ->
+                    project.onAny { it.severity((System.getenv("DAGP_SEVERITY") ?: "warn")) }
+                }
             }
         }
     }

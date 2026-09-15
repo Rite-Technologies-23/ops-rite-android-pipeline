@@ -219,8 +219,8 @@ To fix formatting locally:
 
 Every other check in this pipeline is truly zero-touch: nothing in the caller
 repo needs to change. Dependency-analysis (DAGP, the "unused dependency" half
-of `run_dead_code`) is the one exception, and only for modules that apply
-`com.android.application`, `com.android.library`, or
+of `run_dead_code`) is the one exception, and only for repos where **any**
+module applies `com.android.application`, `com.android.library`, or
 `com.android.dynamic-feature`.
 
 **Why:** DAGP is injected via a Gradle init script so callers don't have to
@@ -228,36 +228,55 @@ touch their build files. For Android modules, DAGP needs to read AGP's own
 `AndroidComponentsExtension` API at runtime -- and an init script's plugin
 classpath is isolated from the classloader that resolves AGP for the
 caller's own `plugins {}` block. There's no reliable injection-only fix for
-that (it's a hard Gradle classloading boundary, not a config issue) --
-see the comments in
+that (it's a hard Gradle classloading boundary, not a config issue) -- see
+the comments in
 [`gradle/dependency-analysis.init.gradle`](gradle/dependency-analysis.init.gradle)
-for the full mechanics. The init script detects this automatically and skips
-Android modules with a log line rather than crashing; pure-JVM/Kotlin modules
-(e.g. a `hl7Core`-style module) are unaffected and get analyzed as normal.
+for the full mechanics. The init script detects Android modules automatically
+and skips them with a log line rather than crashing.
 
-**The fix, once per Android module that wants coverage:** declare DAGP
-directly in that module so it shares AGP's own classloader, pinned to the
-same version this pipeline injects (`DAGP_VERSION` in `push.yml`, currently
-`1.33.0`):
+**This is whole-build, not per-module.** DAGP coordinates root and every
+analyzed subproject through one root-registered build service; every copy
+involved must come from the same classloader. That means a repo **cannot**
+mix "root + some subprojects injected via this init script" with "one
+Android module declares DAGP directly" -- doing so throws a
+`ClassCastException` the first time the two copies try to coordinate, and
+DAGP separately refuses outright to apply to any subproject if the root
+project doesn't have a matching application of its own. So once *any* module
+in a repo needs to declare DAGP directly, the **root project and every
+module you want covered** (Android or not) must all declare it directly, and
+the init script backs off from that repo's `dependencyAnalysis` entirely
+(also with a log line, not a crash).
+
+**The fix, for a repo with at least one Android module:** declare DAGP for
+real on the root project, and on every module you want covered -- pinned to
+the same version this pipeline injects (`DAGP_VERSION` in `push.yml`,
+currently `1.33.0`):
 
 ```kotlin
-// root build.gradle.kts
+// root build.gradle.kts -- applied for real, NOT `apply false`. DAGP
+// requires a matching root application before any subproject can apply it.
 plugins {
-    id("com.autonomousapps.dependency-analysis") version "1.33.0" apply false
+    id("com.autonomousapps.dependency-analysis") version "1.33.0"
 }
 ```
 
 ```kotlin
-// app/build.gradle.kts (and any other Android module you want covered)
+// Every module you want covered, Android or not (app/build.gradle.kts,
+// hl7Core/build.gradle.kts, ...) -- no version needed, inherits root's.
 plugins {
     id("com.autonomousapps.dependency-analysis")
 }
 ```
 
-No further wiring needed -- thresholds, severity (`DAGP_SEVERITY`) and the
-`fail_on_dead_code` gate are still driven entirely by this pipeline's
-`push.yml` inputs, same as every other check. When bumping `DAGP_VERSION` in
-the pipeline, bump the caller's pinned version to match.
+A module left out of this (root declares it, but the module itself doesn't)
+simply won't appear in the dead-code report -- no crash, just missing
+coverage; the init script's log line calls this out per module.
+
+No further wiring needed beyond that -- thresholds, severity
+(`DAGP_SEVERITY`) and the `fail_on_dead_code` gate are still driven entirely
+by this pipeline's `push.yml` inputs, same as every other check. When
+bumping `DAGP_VERSION` in the pipeline, bump the caller's pinned version to
+match.
 
 ---
 
