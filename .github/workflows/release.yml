@@ -132,6 +132,7 @@ jobs:
       # consume) run again.
       run_static_analysis: false
       run_formatting: false
+      run_android_lint: false
       run_security: false
       run_dependency_audit: false
       run_dead_code: false
@@ -346,7 +347,18 @@ jobs:
           ESPER_ORG_ID: ${{ inputs.esper_org_id }}
           ESPER_APP_ID: ${{ inputs.esper_app_id }}
         run: |
-          APK=$(find release/android/signed -name "*.apk" | head -n 1)
+          set -euo pipefail
+          mapfile -d '' APKS < <(find release/android/signed -name "*.apk" -print0)
+
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "❌ No signed APK found to upload to Esper"
+            exit 1
+          fi
+          if [ "${#APKS[@]}" -gt 1 ]; then
+            echo "::warning::Multiple signed APKs found; only uploading the first one to Esper: ${APKS[0]}"
+          fi
+
+          APK="${APKS[0]}"
 
           curl -X POST "https://api.esper.io/v0/enterprise/${ESPER_ORG_ID}/apps/${ESPER_APP_ID}/versions/" \
             -H "Authorization: Bearer ${ESPER_API_KEY}" \
@@ -376,7 +388,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="${{ needs.create_release.outputs.tag }}"
-          FILES=$(find dist -name "*.apk" -o -name "*.aab")
 
-          gh release upload "$TAG" $FILES --clobber
+          mapfile -d '' FILES < <(find dist -name "*.apk" -o -name "*.aab" -print0)
+
+          if [ "${#FILES[@]}" -eq 0 ]; then
+            echo "❌ No APK/AAB found in dist to upload"
+            exit 1
+          fi
+
+          gh release upload "$TAG" "${FILES[@]}" --clobber
