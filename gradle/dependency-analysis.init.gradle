@@ -1,5 +1,6 @@
 // gradle/dependency-analysis.init.gradle
-// Injects the Dependency Analysis Gradle Plugin WITHOUT modifying the calling repo.
+// Injects the Dependency Analysis Gradle Plugin for non-Android subprojects
+// WITHOUT modifying the calling repo.
 //
 // This is the dependency-level half of dead-code analysis: it reports declared
 // dependencies that are never used, dependencies used but not declared, and
@@ -25,6 +26,24 @@
 // `conditionallyApplyToSubprojects`) makes DAGP skip its internal subproject
 // loop entirely -- and we do the equivalent apply ourselves below, by class,
 // to every subproject.
+//
+// ---------------------------------------------------------------------------
+// Android modules are a second, unrelated wall: DAGP's Android integration
+// (ProjectPlugin.configureAndroidAppProject) references AGP's
+// AndroidComponentsExtension at runtime. Loaded from this initscript's
+// isolated classpath, that class isn't visible there -> NoClassDefFoundError
+// on any subproject with com.android.application/library applied. Putting
+// AGP on this initscript's own classpath doesn't fix it either -- that just
+// produces a second, classloader-incompatible Class of the same name, trading
+// the crash for a silent failed-extension-lookup or ClassCastException, and
+// it'd be fragile across AGP/Gradle version bumps. There is no injection-only
+// fix for this one.
+//
+// So: Android subprojects are skipped here and must declare DAGP themselves
+// (sharing AGP's own classloader) to get dead-code coverage -- see the
+// pipeline README's "Dead code on Android modules" section for the one-time,
+// version-pinned snippet. Everything else about adopting this pipeline stays
+// zero-touch; this is the one tool with a real, unavoidable per-caller cost.
 
 import com.autonomousapps.DependencyAnalysisPlugin
 
@@ -49,14 +68,52 @@ beforeSettings { settings ->
     }
 }
 
+def DAGP_PLUGIN_ID = "com.autonomousapps.dependency-analysis"
+def ANDROID_PLUGIN_IDS = [
+    "com.android.application",
+    "com.android.library",
+    "com.android.dynamic-feature",
+]
+
 gradle.rootProject { Project root ->
+    // Root is safe to apply eagerly: AGP is conventionally declared
+    // `apply false` at the root (real application happens per-subproject), so
+    // the root project itself never triggers DAGP's AGP integration code.
     // Applied by class -- see the note above and cyclonedx.init.gradle's
     // CycloneDxPlugin for why apply(String) doesn't work from this classpath.
     root.pluginManager.apply(DependencyAnalysisPlugin)
 
     // Stands in for DAGP's own (disabled, see above) subproject auto-apply,
-    // so every module still gets analyzed, not just the root project.
-    root.subprojects { sub -> sub.pluginManager.apply(DependencyAnalysisPlugin) }
+    // so every eligible module still gets analyzed, not just the root project.
+    root.subprojects { Project sub ->
+        // Deferred to afterEvaluate: a subproject's own plugins {} block --
+        // where it would apply com.android.application, or its own directly
+        // declared copy of DAGP -- runs during that subproject's script
+        // evaluation, which hasn't happened yet at this rootProject-hook
+        // point. We need to see the result of that block before deciding.
+        sub.afterEvaluate {
+            if (sub.pluginManager.hasPlugin(DAGP_PLUGIN_ID)) {
+                // Caller already declared DAGP directly on this module (as
+                // Android modules must). Applying our injected copy on top
+                // would load a second, classloader-incompatible instance --
+                // skip, theirs already covers it.
+                return
+            }
+            def isAndroidModule = ANDROID_PLUGIN_IDS.any { sub.pluginManager.hasPlugin(it) }
+            if (isAndroidModule) {
+                sub.logger.lifecycle(
+                    "[dependency-analysis] Skipping ${sub.path}: applies an Android " +
+                    "plugin, and DAGP can't be injected into Android modules via " +
+                    "initscript (classloader isolation from AGP). Declare DAGP " +
+                    "directly in this module to include it in dead-code analysis " +
+                    "-- see the pipeline README's 'Dead code on Android modules' " +
+                    "section."
+                )
+                return
+            }
+            sub.pluginManager.apply(DependencyAnalysisPlugin)
+        }
+    }
 
     root.extensions.configure("dependencyAnalysis") { ext ->
         // Report-only by default; the CI job decides whether to fail.

@@ -215,6 +215,52 @@ To fix formatting locally:
 
 ---
 
+## Dead code on Android modules
+
+Every other check in this pipeline is truly zero-touch: nothing in the caller
+repo needs to change. Dependency-analysis (DAGP, the "unused dependency" half
+of `run_dead_code`) is the one exception, and only for modules that apply
+`com.android.application`, `com.android.library`, or
+`com.android.dynamic-feature`.
+
+**Why:** DAGP is injected via a Gradle init script so callers don't have to
+touch their build files. For Android modules, DAGP needs to read AGP's own
+`AndroidComponentsExtension` API at runtime -- and an init script's plugin
+classpath is isolated from the classloader that resolves AGP for the
+caller's own `plugins {}` block. There's no reliable injection-only fix for
+that (it's a hard Gradle classloading boundary, not a config issue) --
+see the comments in
+[`gradle/dependency-analysis.init.gradle`](gradle/dependency-analysis.init.gradle)
+for the full mechanics. The init script detects this automatically and skips
+Android modules with a log line rather than crashing; pure-JVM/Kotlin modules
+(e.g. a `hl7Core`-style module) are unaffected and get analyzed as normal.
+
+**The fix, once per Android module that wants coverage:** declare DAGP
+directly in that module so it shares AGP's own classloader, pinned to the
+same version this pipeline injects (`DAGP_VERSION` in `push.yml`, currently
+`1.33.0`):
+
+```kotlin
+// root build.gradle.kts
+plugins {
+    id("com.autonomousapps.dependency-analysis") version "1.33.0" apply false
+}
+```
+
+```kotlin
+// app/build.gradle.kts (and any other Android module you want covered)
+plugins {
+    id("com.autonomousapps.dependency-analysis")
+}
+```
+
+No further wiring needed -- thresholds, severity (`DAGP_SEVERITY`) and the
+`fail_on_dead_code` gate are still driven entirely by this pipeline's
+`push.yml` inputs, same as every other check. When bumping `DAGP_VERSION` in
+the pipeline, bump the caller's pinned version to match.
+
+---
+
 # 📊 Coverage Gate
 
 The CI pipeline automatically:
