@@ -60,6 +60,15 @@ on:
         type: boolean
         default: true
 
+      run_build:
+        required: false
+        type: boolean
+        default: true
+        description: >-
+          Assemble and bundle the APK/AAB (job 6). Off by default only when the
+          caller opts out -- e.g. checks-only on a PR or a plain push, where no
+          release.yml job downstream needs the artifact.
+
       # ---- coverage ----
       coverage_branch_threshold:
         required: false
@@ -882,8 +891,9 @@ jobs:
     name: Build APK & AAB
     runs-on: ${{ inputs.runner }}
     needs: [test]
-    # Still build when tests are disabled by input, but never when they failed.
-    if: ${{ always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
+    # Still build when tests are disabled by input, but never when they failed,
+    # and never when the caller opted out via run_build.
+    if: ${{ always() && inputs.run_build && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
 
     steps:
 
