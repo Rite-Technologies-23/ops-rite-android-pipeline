@@ -56,18 +56,13 @@ allprojects { Project p ->
     }
 
     // One configuration for detekt-cli AND the Compose rule set (nlopez),
-    // which satisfies the `compose:` block in the shared detekt.yml. Passing
-    // the Compose jar through --plugins (a separate classloader) instead of
-    // this classpath sounds cleaner, but detekt-cli's config-property
-    // validation only recognises rule sets whose provider is on ITS OWN main
-    // classpath -- a provider loaded only via --plugins never registers for
-    // validation, so the `compose:` block gets rejected as an unknown
-    // property even though the ruleset itself would still run. Putting both
-    // on one classpath is what the official detekt-cli docs recommend when
-    // you're constructing your own classpath (as we are here) rather than
-    // using the fixed-classpath CLI distribution --plugins exists to extend.
+    // which registers the ruleset the shared detekt.yml's `Compose:` block
+    // configures. ServiceLoader picks up its RuleSetProvider fine from a
+    // plain classpath entry -- no need for --plugins, which exists for the
+    // fixed-classpath CLI distribution, not for a caller-built classpath like
+    // this one.
     //
-    // The only real cost of merging them: io.nlopez.compose.rules:detekt's
+    // The one real cost of merging them: io.nlopez.compose.rules:detekt's
     // "common" module pulls in kotlin-compiler-embeddable:2.0.21, while
     // detekt-cli 1.23.7 strictly requires 2.0.10 -- excluded below so
     // Gradle doesn't try to unify two incompatible pins. compose-rules only

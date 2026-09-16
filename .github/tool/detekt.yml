@@ -163,9 +163,11 @@ coroutines:
     active: true
 
 # Provided by the io.nlopez.compose.rules:detekt plugin, which
-# gradle/detekt.init.gradle adds to the detektPlugins configuration. Without
-# that plugin on the classpath, `validation: true` would reject this block.
-compose:
+# gradle/detekt.init.gradle adds to the detekt-cli classpath. Without that
+# jar present, config validation would reject this block. The ruleSetId is
+# "Compose" (capital C) -- that's what ComposeRuleSetProvider.kt registers it
+# as, not "compose".
+Compose:
   CompositionLocalAllowlist:
     active: false
   ContentEmitterReturningValues:
