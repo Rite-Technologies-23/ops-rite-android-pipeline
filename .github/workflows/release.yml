@@ -7,6 +7,11 @@ on:
         required: true
         type: string
 
+      # java_version and coverage_threshold are unused inside this workflow --
+      # this workflow no longer runs its own CI pass (see the removed `ci`
+      # job below / the note at `create_release`'s artifact download). Kept
+      # `required: true` rather than removed so existing callers that still
+      # pass them don't break; a future major version can drop them.
       java_version:
         required: true
         type: string
@@ -91,13 +96,10 @@ on:
       ESPER_API_KEY:
         required: false
 
+      # Unused (no nested CI pass runs here anymore -- see note near
+      # java_version above). Kept for backward compatibility.
       PIPELINE_TOKEN:
         required: false
-
-    outputs:
-      coverage_percent:
-        description: "Computed JaCoCo LINE coverage percent from CI"
-        value: ${{ jobs.ci.outputs.coverage_percent }}
 
 permissions:
   contents: read
@@ -112,36 +114,8 @@ defaults:
 
 jobs:
 
-  ci:
-    name: Android CI (Reusable)
-    uses: ./.github/workflows/push.yml
-    permissions:
-      contents: read
-      pull-requests: write
-    with:
-      java_version: ${{ inputs.java_version }}
-      build_variant: ${{ inputs.build_variant }}
-      coverage_threshold: ${{ inputs.coverage_threshold }}
-
-      # The caller's own `ci` job already ran the full quality suite (usually
-      # against the Debug variant) before this release workflow was invoked.
-      # Those checks don't depend on build_variant, so re-running them here
-      # would just double CI time for the same result. Only tests + build
-      # (which DO need to happen against the Release variant, for the real
-      # coverage_threshold and the artifacts create_release/sign_android
-      # consume) run again.
-      run_static_analysis: false
-      run_formatting: false
-      run_android_lint: false
-      run_security: false
-      run_dependency_audit: false
-      run_dead_code: false
-    secrets:
-      PIPELINE_TOKEN: ${{ secrets.PIPELINE_TOKEN }}
-
   create_release:
     name: Create GitHub Release
-    needs: ci
     runs-on: ${{ inputs.runner }}
 
     permissions:
@@ -157,6 +131,15 @@ jobs:
         with:
           fetch-depth: 0
 
+      # This workflow does not build anything itself -- it consumes the
+      # artifact the CALLER's own CI job already produced earlier in the same
+      # workflow run (reusable-workflow calls share one run, so artifacts
+      # from a `uses:` job upstream are visible here via plain
+      # actions/download-artifact). The caller is responsible for having run
+      # its CI job with build_variant == inputs.build_variant for this
+      # trigger (typically: Release, chosen dynamically for the same
+      # release-tag push that invokes this workflow) -- see the pipeline
+      # README's "Consolidated CI+CD build" section.
       - name: Download unsigned Android artifacts
         uses: actions/download-artifact@v4
         with:

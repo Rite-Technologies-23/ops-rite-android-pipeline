@@ -103,11 +103,9 @@ failure and a coverage failure surface in the same run rather than one at a time
 ### Reusable CD Workflow (`release.yml`)
 
 ```
-Run CI workflow
-        ↓
 Create GitHub Release
         ↓
-Download unsigned build artifacts
+Download unsigned build artifacts (from the caller's own CI job -- see below)
         ↓
 Sign APK/AAB
         ↓
@@ -117,6 +115,51 @@ Deploy to Esper (optional)
         ↓
 Upload signed artifacts to GitHub Release
 ```
+
+This workflow does **not** run its own CI pass. It consumes the artifact the
+caller's own CI job already built earlier in the same workflow run — see
+"Consolidated CI+CD build" below for why, and what the caller needs to do.
+
+---
+
+## Consolidated CI+CD build
+
+Earlier versions of this pipeline had `release.yml` re-run the entire CI
+workflow itself (tests + build) before creating the release, on top of
+whatever CI pass the caller's own `push.yml` already ran to gate the push.
+For a release-tag push that meant the same source tree got compiled and
+tested twice back-to-back — once against the Debug variant (the caller's own
+CI job), once against Release (this workflow's nested one) — for no benefit,
+since the quality gates (lint, formatting, security, dead-code) don't depend
+on build variant and were already skipped on the second pass.
+
+`release.yml` no longer runs a nested CI job. Instead, the **caller** picks
+the build variant dynamically, once, based on the trigger:
+
+```yaml
+# caller's push.yml
+ci:
+  uses: your-org/android-reusable/.github/workflows/push.yml@main
+  with:
+    build_variant: ${{ (contains(github.ref_name, 'release') && 'Release') || 'Debug' }}
+    coverage_threshold: ${{ (contains(github.ref_name, 'release') && '40.00') || '30.00' }}
+    # ...
+
+cd:
+  uses: your-org/android-reusable/.github/workflows/release.yml@main
+  if: contains(github.ref_name, 'release')   # same condition as above
+  needs: [ci]
+  with:
+    build_variant: "Release"   # always matches what `ci` just built for this trigger
+    # ...
+```
+
+A plain push/PR still gets a fast Debug build + full quality suite. A
+release-tag push builds **Release** directly — once — and `cd` just signs
+and ships the artifact that same `ci` job already produced (reusable-workflow
+calls share one workflow run, so the artifact `ci` uploads is already visible
+to `cd`'s jobs via plain `actions/download-artifact`). No second compile,
+no second test run.
 
 ---
 
@@ -305,9 +348,9 @@ The branch gate is off until `coverage_branch_threshold` is set above `0`.
 
 # 🚀 Reusable CD Workflow (`release.yml`)
 
-Handles:
+Handles (consumes the caller's own CI job's artifact -- see "Consolidated
+CI+CD build" above; does not build anything itself):
 
-- CI execution
 - GitHub Release creation
 - APK/AAB signing
 - Google Play Store deployment
@@ -417,9 +460,23 @@ The same release notes are used for:
 
 # 🧩 Example Caller Workflow Usage
 
+`call-android-release` needs `call-android-ci` to have already built the same
+`build_variant` it downloads (`Release` here) -- see "Consolidated CI+CD
+build" above for the full dynamic-variant pattern; this snippet fixes it to
+Release for brevity.
+
 ```yaml
+call-android-ci:
+  uses: your-org/android-reusable/.github/workflows/push.yml@main
+  with:
+    java_version: 17
+    build_variant: Release
+    coverage_threshold: "75.00"
+    # ...
+
 call-android-release:
   uses: your-org/android-reusable/.github/workflows/release.yml@main
+  needs: call-android-ci
 
   with:
     version: 1.2.0
