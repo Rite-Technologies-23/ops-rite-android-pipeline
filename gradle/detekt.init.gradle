@@ -5,22 +5,31 @@
 //   :<module>:detekt   -> lint run, reports in <module>/build/reports/detekt/
 //
 // Versions are overridable via env vars so CI can bump without editing this file.
+//
+// -----------------------------------------------------------------------------
+// This runs detekt-cli directly via JavaExec, NOT detekt-gradle-plugin.
+// DetektPlugin.apply() unconditionally registers a
+// pluginManager.withPlugin("com.android.base") { ... } callback that fires once
+// AGP applies to the project and references AGP's BaseExtension class. That
+// class is loaded by AGP's own plugin classloader; DetektPlugin here is loaded
+// from this initscript's isolated classpath, which can't see it ->
+// NoClassDefFoundError on every module that applies com.android.application /
+// com.android.library (e.g. app, hl7Core). This is the exact same
+// classloader-isolation wall documented in dependency-analysis.init.gradle for
+// DAGP, just tripped by a different plugin. Unlike DAGP, skipping Android
+// modules isn't a workable answer here -- for a repo where every Kotlin module
+// applies AGP, that would leave Detekt linting nothing.
+//
+// detekt-cli is a plain artifact with a runnable main class and no Gradle-API
+// or AGP dependency at all, so invoking it directly as a JavaExec never
+// touches DetektPlugin's Android-integration code path, and needs no
+// direct declaration or other change in the caller repo.
+// -----------------------------------------------------------------------------
+
+import org.gradle.api.attributes.Usage
 
 def detektVersion  = System.getenv("DETEKT_VERSION")        ?: "1.23.7"
 def composeVersion = System.getenv("DETEKT_COMPOSE_VERSION") ?: "0.4.22"
-
-initscript {
-    repositories {
-        gradlePluginPortal()
-        mavenCentral()
-    }
-    dependencies {
-        classpath "io.gitlab.arturbosch.detekt:detekt-gradle-plugin:" +
-                (System.getenv("DETEKT_VERSION") ?: "1.23.7")
-    }
-}
-
-import io.gitlab.arturbosch.detekt.DetektPlugin
 
 // Detekt resolves detekt-cli + rule plugins from PROJECT repositories. Modern Android
 // builds often set RepositoriesMode.FAIL_ON_PROJECT_REPOS, so inject at the settings
@@ -46,64 +55,76 @@ allprojects { Project p ->
         return
     }
 
-    // Applied by class -- apply plugin: "io.gitlab.arturbosch.detekt" throws
-    // UnknownPluginException from an initscript-only classpath (see spotless.init.gradle).
-    p.pluginManager.apply(DetektPlugin)
-
-    // Compose rule set (nlopez) satisfies the `compose:` block in the shared
-    // detekt.yml and adds Compose-specific checks.
-    p.dependencies {
-        add("detektPlugins", "io.nlopez.compose.rules:detekt:${composeVersion}")
+    // A plain resolvable configuration, unrelated to the project's own
+    // dependency graph -- just detekt-cli (which transitively pulls in every
+    // built-in rule set) plus the Compose rule set (nlopez), which satisfies
+    // the `compose:` block in the shared detekt.yml. Putting both jars on one
+    // classpath is enough for detekt-cli's ServiceLoader-based rule-set
+    // discovery to pick up the Compose rules too, without a separate
+    // --plugins argument.
+    def detektCliClasspath = p.configurations.maybeCreate("detektCliClasspath")
+    detektCliClasspath.canBeConsumed = false
+    detektCliClasspath.attributes {
+        it.attribute(Usage.USAGE_ATTRIBUTE, p.objects.named(Usage, Usage.JAVA_RUNTIME))
     }
+    p.dependencies.add("detektCliClasspath", "io.gitlab.arturbosch.detekt:detekt-cli:${detektVersion}")
+    p.dependencies.add("detektCliClasspath", "io.nlopez.compose.rules:detekt:${composeVersion}")
 
-    p.extensions.configure("detekt") { d ->
-        d.toolVersion = detektVersion
+    def reportDir = p.layout.buildDirectory.dir("reports/detekt")
 
-        // buildUponDefaultConfig is what activates detekt's default rules that the
-        // shared config does not mention -- including the unused-code rules
-        // (UnusedPrivateMember / UnusedPrivateProperty / UnusedParameter).
-        d.buildUponDefaultConfig = true
-        d.parallel = true
-        d.ignoreFailures = false
-        d.autoCorrect = false
+    p.tasks.register("detekt", JavaExec) { t ->
+        t.group = "verification"
+        t.description = "Runs detekt-cli directly (bypasses detekt-gradle-plugin's Android integration)."
 
-        // DETEKT_CONFIG is an absolute path (or one relative to the root project)
-        // pointing at the pipeline's shared .github/tool/detekt.yml.
-        def cfg = System.getenv("DETEKT_CONFIG")
-        if (cfg) {
-            def cfgFile = new File(cfg)
-            if (!cfgFile.isAbsolute()) {
-                cfgFile = p.rootProject.file(cfg)
+        t.mainClass.set("io.gitlab.arturbosch.detekt.cli.Main")
+        t.classpath = detektCliClasspath
+
+        t.doFirst {
+            def srcDirs = p.files("src/main/java", "src/main/kotlin").filter { it.exists() }
+            if (srcDirs.empty) {
+                throw new GradleException("No src/main/{java,kotlin} found for ${p.path}")
             }
-            if (cfgFile.exists()) {
-                d.config.setFrom(cfgFile)
+
+            def outDir = reportDir.get().asFile
+            outDir.mkdirs()
+
+            def cliArgs = [
+                    "--input", srcDirs.files.collect { it.absolutePath }.join(","),
+                    // buildUponDefaultConfig is what activates detekt's default rules that
+                    // the shared config does not mention -- including the unused-code
+                    // rules (UnusedPrivateMember / UnusedPrivateProperty / UnusedParameter).
+                    "--build-upon-default-config",
+                    "--parallel",
+                    "--jvm-target", (System.getenv("JAVA_VERSION") ?: "17"),
+                    "--report", "xml:${new File(outDir, 'detekt.xml').absolutePath}",
+                    "--report", "html:${new File(outDir, 'detekt.html').absolutePath}",
+                    "--report", "txt:${new File(outDir, 'detekt.txt').absolutePath}",
+                    "--report", "sarif:${new File(outDir, 'detekt.sarif').absolutePath}",
+            ]
+
+            // DETEKT_CONFIG is an absolute path (or one relative to the root project)
+            // pointing at the pipeline's shared .github/tool/detekt.yml.
+            def cfg = System.getenv("DETEKT_CONFIG")
+            if (cfg) {
+                def cfgFile = new File(cfg)
+                if (!cfgFile.isAbsolute()) {
+                    cfgFile = p.rootProject.file(cfg)
+                }
+                if (cfgFile.exists()) {
+                    cliArgs += ["--config", cfgFile.absolutePath]
+                }
             }
-        }
 
-        // Honour a caller-supplied baseline so existing debt does not block adoption.
-        def baseline = p.file("detekt-baseline.xml")
-        if (!baseline.exists()) {
-            baseline = p.rootProject.file("detekt-baseline.xml")
-        }
-        if (baseline.exists()) {
-            d.baseline = baseline
-        }
+            // Honour a caller-supplied baseline so existing debt does not block adoption.
+            def baseline = p.file("detekt-baseline.xml")
+            if (!baseline.exists()) {
+                baseline = p.rootProject.file("detekt-baseline.xml")
+            }
+            if (baseline.exists()) {
+                cliArgs += ["--baseline", baseline.absolutePath]
+            }
 
-        d.source.setFrom(
-                p.files("src/main/java", "src/main/kotlin")
-                        .filter { it.exists() }
-        )
-    }
-
-    p.tasks.named("detekt").configure { t ->
-        t.reports {
-            xml.required = true
-            html.required = true
-            txt.required = true
-            sarif.required = true
-            md.required = false
+            t.args = cliArgs
         }
-        // Detekt parses source directly; it does not need a compiled classpath.
-        t.jvmTarget = System.getenv("JAVA_VERSION") ?: "17"
     }
 }
