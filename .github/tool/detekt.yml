@@ -139,8 +139,6 @@ potential-bugs:
   active: true
   CastToNullableType:
     active: true
-  IncorrectScopeFunctions:
-    active: true
   UnsafeCallOnNullableType:
     active: true
   UnsafeCast:
