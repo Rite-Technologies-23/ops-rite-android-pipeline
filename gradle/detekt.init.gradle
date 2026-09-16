@@ -55,20 +55,33 @@ allprojects { Project p ->
         return
     }
 
-    // A plain resolvable configuration, unrelated to the project's own
-    // dependency graph -- just detekt-cli (which transitively pulls in every
-    // built-in rule set) plus the Compose rule set (nlopez), which satisfies
-    // the `compose:` block in the shared detekt.yml. Putting both jars on one
-    // classpath is enough for detekt-cli's ServiceLoader-based rule-set
-    // discovery to pick up the Compose rules too, without a separate
-    // --plugins argument.
+    // Two SEPARATE resolvable configurations, deliberately not merged.
+    // detekt-cli 1.23.7 strictly pins kotlin-compiler-embeddable:2.0.10, but
+    // io.nlopez.compose.rules:detekt:0.4.22 (via its "common" module) pulls in
+    // kotlin-compiler-embeddable:2.0.21 -- putting both in one configuration
+    // makes Gradle try to unify those two graphs and fail outright on the
+    // strict-version conflict. The Gradle-plugin-based setup this replaced
+    // never hit this because "detektPlugins" was already its own separate
+    // configuration/classloader from Detekt's main runtime classpath; keeping
+    // that same separation here (main classpath vs. --plugins jars below)
+    // avoids the conflict instead of trying to reconcile it.
     def detektCliClasspath = p.configurations.maybeCreate("detektCliClasspath")
     detektCliClasspath.canBeConsumed = false
     detektCliClasspath.attributes {
         it.attribute(Usage.USAGE_ATTRIBUTE, p.objects.named(Usage, Usage.JAVA_RUNTIME))
     }
     p.dependencies.add("detektCliClasspath", "io.gitlab.arturbosch.detekt:detekt-cli:${detektVersion}")
-    p.dependencies.add("detektCliClasspath", "io.nlopez.compose.rules:detekt:${composeVersion}")
+
+    // Compose rule set (nlopez) satisfies the `compose:` block in the shared
+    // detekt.yml. Resolved independently and passed via --plugins below, so
+    // its own transitive kotlin-compiler-embeddable version never has to
+    // agree with detekt-cli's.
+    def detektPluginsClasspath = p.configurations.maybeCreate("detektPluginsClasspath")
+    detektPluginsClasspath.canBeConsumed = false
+    detektPluginsClasspath.attributes {
+        it.attribute(Usage.USAGE_ATTRIBUTE, p.objects.named(Usage, Usage.JAVA_RUNTIME))
+    }
+    p.dependencies.add("detektPluginsClasspath", "io.nlopez.compose.rules:detekt:${composeVersion}")
 
     def reportDir = p.layout.buildDirectory.dir("reports/detekt")
 
@@ -100,6 +113,7 @@ allprojects { Project p ->
                     "--report", "html:${new File(outDir, 'detekt.html').absolutePath}",
                     "--report", "txt:${new File(outDir, 'detekt.txt').absolutePath}",
                     "--report", "sarif:${new File(outDir, 'detekt.sarif').absolutePath}",
+                    "--plugins", detektPluginsClasspath.files.collect { it.absolutePath }.join(","),
             ]
 
             // DETEKT_CONFIG is an absolute path (or one relative to the root project)

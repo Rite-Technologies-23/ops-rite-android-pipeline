@@ -43,3 +43,22 @@ exclude:
 # Report-only by default. Raise this once the baseline is triaged, or commit a
 # qodana.sarif.json baseline and flip fail_on_dead_code in the workflow.
 failThreshold: 0
+
+# The qodana-jvm-community image only bundles a single JDK (21 as of the 2024.3
+# linter), but callers commonly pin jvmToolchain(17) (Gradle's Java Toolchain
+# API, distinct from just running Gradle itself under a given JDK) to match
+# their app's compileOptions. With no toolchain resolver registered, Gradle
+# refuses to auto-download a matching JDK and fails every task with "Cannot
+# find a Java installation ... Toolchain download repositories have not been
+# configured." Since this runs inside Qodana's own ephemeral checkout (never
+# pushed back to the caller), prepend the toolchain resolver plugin to
+# settings.gradle(.kts) here rather than requiring the caller to commit it --
+# idempotent so a caller that already has it is left untouched.
+bootstrap: |
+  set -euo pipefail
+  for f in settings.gradle.kts settings.gradle; do
+    if [ -f "$f" ] && ! grep -q "foojay-resolver-convention" "$f"; then
+      { printf 'plugins {\n    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"\n}\n\n'; cat "$f"; } > "$f.qodana-tmp"
+      mv "$f.qodana-tmp" "$f"
+    fi
+  done
