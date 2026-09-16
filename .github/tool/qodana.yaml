@@ -55,7 +55,7 @@ failThreshold: 0
 # settings.gradle(.kts) here rather than requiring the caller to commit it --
 # idempotent so a caller that already has it is left untouched.
 bootstrap: |
-  set -euo pipefail
+  set -eu
   for f in settings.gradle.kts settings.gradle; do
     if [ -f "$f" ] && ! grep -q "foojay-resolver-convention" "$f"; then
       { printf 'plugins {\n    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"\n}\n\n'; cat "$f"; } > "$f.qodana-tmp"
