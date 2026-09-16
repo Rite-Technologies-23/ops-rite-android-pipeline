@@ -54,11 +54,21 @@ failThreshold: 0
 # pushed back to the caller), prepend the toolchain resolver plugin to
 # settings.gradle(.kts) here rather than requiring the caller to commit it --
 # idempotent so a caller that already has it is left untouched.
+#
+# The loop this used to be written as (`for f in ...; do ... "$f" ... ; done`)
+# broke in practice: whatever hands this string to the container's shell ate
+# the "$f" references before the shell ever ran, leaving `mv` with no operand.
+# Spelled out per file instead, with no shell variables at all, so there's
+# nothing for that layer to mangle.
 bootstrap: |
   set -eu
-  for f in settings.gradle.kts settings.gradle; do
-    if [ -f "$f" ] && ! grep -q "foojay-resolver-convention" "$f"; then
-      { printf 'plugins {\n    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"\n}\n\n'; cat "$f"; } > "$f.qodana-tmp"
-      mv "$f.qodana-tmp" "$f"
-    fi
-  done
+  if [ -f settings.gradle.kts ] && ! grep -q "foojay-resolver-convention" settings.gradle.kts; then
+    printf 'plugins {\n    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"\n}\n\n' > settings.gradle.kts.qodana-tmp
+    cat settings.gradle.kts >> settings.gradle.kts.qodana-tmp
+    mv settings.gradle.kts.qodana-tmp settings.gradle.kts
+  fi
+  if [ -f settings.gradle ] && ! grep -q "foojay-resolver-convention" settings.gradle; then
+    printf 'plugins {\n    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"\n}\n\n' > settings.gradle.qodana-tmp
+    cat settings.gradle >> settings.gradle.qodana-tmp
+    mv settings.gradle.qodana-tmp settings.gradle
+  fi
