@@ -518,18 +518,23 @@ jobs:
 
           # Never fail here -- the gate step below decides, so that a scanner
           # outage cannot be mistaken for a security finding.
-          semgrep scan \
-            --config p/kotlin \
-            --config p/java \
-            --config p/secrets \
-            --config .pipeline/.github/tool/semgrep/android-rules.yml \
-            --exclude 'build' \
-            --exclude '.pipeline' \
-            --exclude '**/generated/**' \
-            --metrics=off \
-            --json --output semgrep.json \
-            --sarif --sarif-output semgrep.sarif \
-            --no-error || true
+          #
+          # --json and --sarif are mutually exclusive report formats, so
+          # Semgrep must be invoked once per format.
+          SEMGREP_ARGS=(
+            --config p/kotlin
+            --config p/java
+            --config p/secrets
+            --config .pipeline/.github/tool/semgrep/android-rules.yml
+            --exclude 'build'
+            --exclude '.pipeline'
+            --exclude '**/generated/**'
+            --metrics=off
+            --no-error
+          )
+
+          semgrep scan "${SEMGREP_ARGS[@]}" --json --output semgrep.json || true
+          semgrep scan "${SEMGREP_ARGS[@]}" --sarif --sarif-output semgrep.sarif || true
 
           test -f semgrep.json || echo '{"results":[],"errors":[]}' > semgrep.json
 
