@@ -29,6 +29,15 @@ on:
         type: string
         default: ubuntu-latest
 
+      sign_build:
+        required: false
+        type: boolean
+        default: true
+        description: >-
+          Sign the APK/AAB before attaching them to the GitHub Release. Forced on
+          when deploying to Play Store/Esper. If the keystore secrets are missing,
+          signing is skipped with a warning (and deploys are skipped too).
+
       deploy_to_playstore:
         required: false
         type: boolean
@@ -114,8 +123,130 @@ defaults:
 
 jobs:
 
+  # This workflow does not build anything itself -- it consumes the artifact the
+  # CALLER's own CI job already produced earlier in the same workflow run. The
+  # caller must have built build_variant == inputs.build_variant for this
+  # trigger (see the pipeline README's "Consolidated CI+CD build" section).
+  sign_android:
+    name: Sign Android
+    if: ${{ inputs.sign_build || inputs.deploy_to_playstore || inputs.deploy_to_esper }}
+    runs-on: ${{ inputs.runner }}
+
+    outputs:
+      signed: ${{ steps.chk.outputs.ok }}
+
+    steps:
+
+      # Missing keys never fail the run: signing is skipped, and every
+      # signing step plus the deploy jobs key off `ok`.
+      - name: Check signing secrets
+        id: chk
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE" ] && [ -n "$KEYSTORE_PASSWORD" ] && [ -n "$KEY_PASSWORD" ] && [ -n "$KEY_ALIAS" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Signing skipped: one or more of ANDROID_KEYSTORE, KEYSTORE_PASSWORD, KEY_PASSWORD, KEY_ALIAS is not set. The release will carry unsigned artifacts and Play Store/Esper deploys will be skipped."
+          fi
+
+      - name: Download unsigned Android artifacts
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: android-build-outputs-${{ inputs.build_variant }}
+          path: release/android/unsigned
+
+      - name: Install Android SDK tools
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+
+      - name: Install Build Tools
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        env:
+          BUILD_TOOLS_VERSION: ${{ inputs.android_build_tools_version }}
+        run: |
+          set -euo pipefail
+          sdkmanager "build-tools;${BUILD_TOOLS_VERSION}" "platform-tools"
+          echo "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}" >> "$GITHUB_PATH"
+
+      - name: Decode Keystore
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        env:
+          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/android
+          printf "%s" "$ANDROID_KEYSTORE" | base64 --decode > /tmp/android/upload-keystore.jks
+
+      - name: Sign APK
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        env:
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/android/signed
+
+          APKS=$(find release/android/unsigned -name "*.apk" || true)
+
+          for APK in $APKS; do
+            BASENAME=$(basename "$APK" .apk)
+            OUT="release/android/signed/${BASENAME}-signed.apk"
+
+            zipalign -f 4 "$APK" /tmp/aligned.apk
+
+            apksigner sign \
+              --ks /tmp/android/upload-keystore.jks \
+              --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass "pass:$KEYSTORE_PASSWORD" \
+              --key-pass "pass:$KEY_PASSWORD" \
+              --out "$OUT" \
+              /tmp/aligned.apk
+          done
+
+      - name: Sign AAB
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        env:
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/android/signed
+          AABS=$(find release/android/unsigned -name "*.aab" || true)
+
+          for AAB in $AABS; do
+            BASENAME=$(basename "$AAB" .aab)
+            OUT="release/android/signed/${BASENAME}-signed.aab"
+
+            cp "$AAB" "$OUT"
+
+            jarsigner \
+              -keystore /tmp/android/upload-keystore.jks \
+              -storepass "$KEYSTORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              "$OUT" \
+              "$KEY_ALIAS"
+          done
+
+      - name: Upload signed artifacts
+        if: ${{ steps.chk.outputs.ok == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-signed
+          path: release/android/signed/*
+
   create_release:
     name: Create GitHub Release
+    needs: sign_android
+    # sign_android is skipped when signing is off; !failure() lets this still run.
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ${{ inputs.runner }}
 
     permissions:
@@ -131,20 +262,27 @@ jobs:
         with:
           fetch-depth: 0
 
-      # This workflow does not build anything itself -- it consumes the
-      # artifact the CALLER's own CI job already produced earlier in the same
-      # workflow run (reusable-workflow calls share one run, so artifacts
-      # from a `uses:` job upstream are visible here via plain
-      # actions/download-artifact). The caller is responsible for having run
-      # its CI job with build_variant == inputs.build_variant for this
-      # trigger (typically: Release, chosen dynamically for the same
-      # release-tag push that invokes this workflow) -- see the pipeline
-      # README's "Consolidated CI+CD build" section.
-      - name: Download unsigned Android artifacts
+      - name: Download signed artifacts
+        if: ${{ needs.sign_android.outputs.signed == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: android-signed
+          path: release/android/final
+
+      # Unsigned fallback: sign_build is off, or the signing secrets are missing.
+      - name: Download unsigned artifacts
+        if: ${{ needs.sign_android.outputs.signed != 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: android-build-outputs-${{ inputs.build_variant }}
           path: release/android/unsigned
+
+      - name: Collect unsigned APK/AAB
+        if: ${{ needs.sign_android.outputs.signed != 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/android/final
+          find release/android/unsigned \( -name "*.apk" -o -name "*.aab" \) -exec cp {} release/android/final/ \;
 
       - name: Determine next GitHub version
         id: version_check
@@ -180,99 +318,14 @@ jobs:
           tag_name: ${{ steps.version_check.outputs.tag }}
           name: Release ${{ steps.version_check.outputs.tag }}
           generate_release_notes: true
+          files: release/android/final/*
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  sign_android:
-    name: Sign Android
-    if: ${{ inputs.deploy_to_playstore || inputs.deploy_to_esper }}
-    needs: create_release
-    runs-on: ${{ inputs.runner }}
-
-    steps:
-
-      - name: Download unsigned Android artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: android-build-outputs-${{ inputs.build_variant }}
-          path: release/android/unsigned
-
-      - name: Install Android SDK tools
-        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
-
-      - name: Install Build Tools
-        env:
-          BUILD_TOOLS_VERSION: ${{ inputs.android_build_tools_version }}
-        run: |
-          set -euo pipefail
-          sdkmanager "build-tools;${BUILD_TOOLS_VERSION}" "platform-tools"
-          echo "$ANDROID_SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}" >> "$GITHUB_PATH"
-
-      - name: Decode Keystore
-        env:
-          ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE }}
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/android
-          printf "%s" "$ANDROID_KEYSTORE" | base64 --decode > /tmp/android/upload-keystore.jks
-
-      - name: Sign APK
-        env:
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          mkdir -p release/android/signed
-
-          APKS=$(find release/android/unsigned -name "*.apk" || true)
-
-          for APK in $APKS; do
-            BASENAME=$(basename "$APK" .apk)
-            OUT="release/android/signed/${BASENAME}-signed.apk"
-
-            zipalign -f 4 "$APK" /tmp/aligned.apk
-
-            apksigner sign \
-              --ks /tmp/android/upload-keystore.jks \
-              --ks-key-alias "$KEY_ALIAS" \
-              --ks-pass "pass:$KEYSTORE_PASSWORD" \
-              --key-pass "pass:$KEY_PASSWORD" \
-              --out "$OUT" \
-              /tmp/aligned.apk
-          done
-
-      - name: Sign AAB
-        env:
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          AABS=$(find release/android/unsigned -name "*.aab" || true)
-
-          for AAB in $AABS; do
-            BASENAME=$(basename "$AAB" .aab)
-            OUT="release/android/signed/${BASENAME}-signed.aab"
-
-            cp "$AAB" "$OUT"
-
-            jarsigner \
-              -keystore /tmp/android/upload-keystore.jks \
-              -storepass "$KEYSTORE_PASSWORD" \
-              -keypass "$KEY_PASSWORD" \
-              "$OUT" \
-              "$KEY_ALIAS"
-          done
-
-      - name: Upload signed artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-signed
-          path: release/android/signed/*
-
+  # Deploys run only when signing actually happened; they never touch the
+  # unsigned artifacts.
   deploy_playstore:
     name: Deploy to Play Store
-    if: ${{ inputs.deploy_to_playstore }}
+    if: ${{ inputs.deploy_to_playstore && needs.sign_android.outputs.signed == 'true' }}
     needs: sign_android
     runs-on: ${{ inputs.runner }}
 
@@ -312,7 +365,7 @@ jobs:
 
   deploy_esper:
     name: Deploy to Esper
-    if: ${{ inputs.deploy_to_esper }}
+    if: ${{ inputs.deploy_to_esper && needs.sign_android.outputs.signed == 'true' }}
     needs: [sign_android, create_release]
     runs-on: ${{ inputs.runner }}
 
@@ -347,38 +400,3 @@ jobs:
             -H "Authorization: Bearer ${ESPER_API_KEY}" \
             -F "apk=@${APK}" \
             -F "releaseNotes=Release ${{ needs.create_release.outputs.tag }}"
-
-  upload_to_release:
-    name: Upload artifacts to GitHub Release
-    if: ${{ inputs.deploy_to_playstore || inputs.deploy_to_esper }}
-    needs: [create_release, sign_android]
-    runs-on: ${{ inputs.runner }}
-
-    permissions:
-      contents: write
-
-    steps:
-
-      - uses: actions/checkout@v4
-
-      - name: Download signed artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: android-signed
-          path: dist
-
-      - name: Upload assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="${{ needs.create_release.outputs.tag }}"
-
-          mapfile -d '' FILES < <(find dist -name "*.apk" -o -name "*.aab" -print0)
-
-          if [ "${#FILES[@]}" -eq 0 ]; then
-            echo "❌ No APK/AAB found in dist to upload"
-            exit 1
-          fi
-
-          gh release upload "$TAG" "${FILES[@]}" --clobber
