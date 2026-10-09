@@ -331,16 +331,31 @@ jobs:
 
     steps:
 
+      - name: Check Play Store credentials
+        id: chk
+        env:
+          PLAYSTORE_SERVICE_ACCOUNT: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+        run: |
+          if [ -n "$PLAYSTORE_SERVICE_ACCOUNT" ] && [ -n "$PACKAGE_NAME" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Play Store deploy skipped: PLAYSTORE_SERVICE_ACCOUNT secret or package_name input is empty."
+          fi
+
       - uses: actions/checkout@v4
+        if: ${{ steps.chk.outputs.ok == 'true' }}
 
       - name: Download signed artifacts
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: android-signed
           path: release/android/signed
 
       - name: Prepare What's New (Optional)
-        if: ${{ inputs.enable_whats_new && inputs.whats_new_file != '' }}
+        if: ${{ steps.chk.outputs.ok == 'true' && inputs.enable_whats_new && inputs.whats_new_file != '' }}
         run: |
           LANG="en-US"
           mkdir -p "$RUNNER_TEMP/whatsnew/${LANG}"
@@ -353,6 +368,7 @@ jobs:
           fi
 
       - name: Upload to Play Store
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
@@ -371,13 +387,29 @@ jobs:
 
     steps:
 
+      - name: Check Esper configuration
+        id: chk
+        env:
+          ESPER_API_KEY: ${{ secrets.ESPER_API_KEY }}
+          ESPER_ORG_ID: ${{ inputs.esper_org_id }}
+          ESPER_APP_ID: ${{ inputs.esper_app_id }}
+        run: |
+          if [ -n "$ESPER_API_KEY" ] && [ -n "$ESPER_ORG_ID" ] && [ -n "$ESPER_APP_ID" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Esper deploy skipped: ESPER_API_KEY secret, esper_org_id or esper_app_id is empty."
+          fi
+
       - name: Download signed artifacts
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         uses: actions/download-artifact@v4
         with:
           name: android-signed
           path: release/android/signed
 
       - name: Upload to Esper
+        if: ${{ steps.chk.outputs.ok == 'true' }}
         env:
           ESPER_API_KEY: ${{ secrets.ESPER_API_KEY }}
           ESPER_ORG_ID: ${{ inputs.esper_org_id }}
