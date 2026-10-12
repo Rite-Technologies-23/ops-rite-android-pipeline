@@ -1,3 +1,12 @@
+# Reusable Android CD. Consumes the artifact the caller's CI built; never rebuilds.
+#
+# 1. sign_android: signs the APK and AAB when sign_build or a deploy is on.
+#    Missing keystore secrets skip signing with a warning, not a failure.
+# 2. create_release: always runs. Creates the GitHub Release with the signed
+#    files, or the unsigned ones if signing was skipped.
+# 3. deploy_playstore, deploy_esper: opt-in, signed builds only. Each is
+#    skipped with a warning when its credentials are missing.
+
 name: "Reusable Android CD (Release)"
 
 on:
@@ -7,11 +16,6 @@ on:
         required: true
         type: string
 
-      # java_version and coverage_threshold are unused inside this workflow --
-      # this workflow no longer runs its own CI pass (see the removed `ci`
-      # job below / the note at `create_release`'s artifact download). Kept
-      # `required: true` rather than removed so existing callers that still
-      # pass them don't break; a future major version can drop them.
       java_version:
         required: true
         type: string
@@ -105,8 +109,6 @@ on:
       ESPER_API_KEY:
         required: false
 
-      # Unused (no nested CI pass runs here anymore -- see note near
-      # java_version above). Kept for backward compatibility.
       PIPELINE_TOKEN:
         required: false
 
@@ -123,10 +125,6 @@ defaults:
 
 jobs:
 
-  # This workflow does not build anything itself -- it consumes the artifact the
-  # CALLER's own CI job already produced earlier in the same workflow run. The
-  # caller must have built build_variant == inputs.build_variant for this
-  # trigger (see the pipeline README's "Consolidated CI+CD build" section).
   sign_android:
     name: Sign Android
     if: ${{ inputs.sign_build || inputs.deploy_to_playstore || inputs.deploy_to_esper }}
@@ -137,8 +135,6 @@ jobs:
 
     steps:
 
-      # Missing keys never fail the run: signing is skipped, and every
-      # signing step plus the deploy jobs key off `ok`.
       - name: Check signing secrets
         id: chk
         env:
@@ -163,7 +159,7 @@ jobs:
 
       - name: Install Android SDK tools
         if: ${{ steps.chk.outputs.ok == 'true' }}
-        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
 
       - name: Install Build Tools
         if: ${{ steps.chk.outputs.ok == 'true' }}
@@ -242,10 +238,11 @@ jobs:
           name: android-signed
           path: release/android/signed/*
 
+
+  # Runs even when sign_android is skipped (unsigned fallback).
   create_release:
     name: Create GitHub Release
     needs: sign_android
-    # sign_android is skipped when signing is off; !failure() lets this still run.
     if: ${{ !cancelled() && !failure() }}
     runs-on: ${{ inputs.runner }}
 
@@ -269,7 +266,6 @@ jobs:
           name: android-signed
           path: release/android/final
 
-      # Unsigned fallback: sign_build is off, or the signing secrets are missing.
       - name: Download unsigned artifacts
         if: ${{ needs.sign_android.outputs.signed != 'true' }}
         uses: actions/download-artifact@v4
@@ -313,7 +309,7 @@ jobs:
           echo "tag=v$CURRENT_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
         with:
           tag_name: ${{ steps.version_check.outputs.tag }}
           name: Release ${{ steps.version_check.outputs.tag }}
@@ -321,8 +317,7 @@ jobs:
           files: release/android/final/*
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  # Deploys run only when signing actually happened; they never touch the
-  # unsigned artifacts.
+
   deploy_playstore:
     name: Deploy to Play Store
     if: ${{ inputs.deploy_to_playstore && needs.sign_android.outputs.signed == 'true' }}
@@ -369,7 +364,7 @@ jobs:
 
       - name: Upload to Play Store
         if: ${{ steps.chk.outputs.ok == 'true' }}
-        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5 # v1
+        uses: r0adkll/upload-google-play@e738b9dd8f2476ea806d921b64aacd24f34515a5
         with:
           serviceAccountJsonPlainText: ${{ secrets.PLAYSTORE_SERVICE_ACCOUNT }}
           packageName: ${{ inputs.package_name }}
@@ -378,6 +373,7 @@ jobs:
           status: ${{ inputs.playstore_status }}
           inAppUpdatePriority: 2
           whatsNewDirectory: ${{ inputs.enable_whats_new && inputs.whats_new_file != '' && format('{0}/whatsnew', runner.temp) || '' }}
+
 
   deploy_esper:
     name: Deploy to Esper
